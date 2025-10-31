@@ -1,0 +1,7 @@
+ngrok http --domain=gex-trading.ngrok.io 3000
+
+cd C:\Users\jacem\Downloads\gex-trading-intelligence
+bun run server.js
+
+"java -jar ThetaTerminal.jar" cd C:\Users\jacem\Downloads
+... Jacem5958@gmail.com Hayden1015966 USER/PASS

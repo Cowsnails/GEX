@@ -2047,7 +2047,17 @@ export function renderTraderSignals() {
               🧪 Test Copy Trader Mode
             </div>
             <div style="font-size: 13px; color: #9ca3af; margin-bottom: 16px;">
-              Simulate a fake OCR signal for testing. Select a ticker, click Start Test, and after 30 seconds a random option signal will be copy traded.
+              Simulate a fake OCR signal for testing. Select which trader to mimic, enter a ticker, click Start Test, and after 30 seconds a random option signal will be sent and trigger your copy trade rules.
+            </div>
+
+            <!-- Trader to Mimic -->
+            <div class="form-group">
+              <label class="form-label">Mimic Trader</label>
+              <select class="form-input" id="testMimicTrader">
+                <option value="elite">🔥 Elite Trades</option>
+                <option value="brando">💜 Brando + Shoof</option>
+              </select>
+              <div class="form-hint">Test signal will appear as if it came from this trader</div>
             </div>
 
             <!-- Test Ticker Input -->
@@ -2912,7 +2922,7 @@ function setupCopyTradeModal() {
     }
   };
 
-  const generateTestSignal = async (ticker) => {
+  const generateTestSignal = async (ticker, mimicTrader) => {
     try {
       // Validate ticker is in universe
       const tickerUpper = ticker.toUpperCase().trim();
@@ -2920,7 +2930,16 @@ function setupCopyTradeModal() {
         throw new Error('Please enter a ticker');
       }
 
-      showTestStatus('🔍 Fetching expiration dates...', 'info');
+      // Validate trader selection
+      if (!mimicTrader || !['elite', 'brando'].includes(mimicTrader)) {
+        throw new Error('Please select a trader to mimic');
+      }
+
+      // Set trader priority (same as real OCR)
+      const traderPriority = mimicTrader === 'elite' ? 1 : 2;
+      const traderName = mimicTrader === 'elite' ? 'Elite Trades' : 'Brando + Shoof';
+
+      showTestStatus(`🔍 Fetching expiration dates for ${tickerUpper}...`, 'info');
 
       // Fetch available expirations for ticker
       const expResponse = await fetch(`/api/options/expirations?root=${tickerUpper}`, {
@@ -2995,15 +3014,15 @@ function setupCopyTradeModal() {
                        (randomOption.mid && randomOption.mid > 0 ? randomOption.mid :
                        (randomOption.bid && randomOption.bid > 0 ? randomOption.bid : 0.50));
 
-      // Generate test signal in OCR format
+      // Generate test signal in OCR format - EXACTLY like real OCR signals
       const testSignal = {
         root: tickerUpper,
         expiration: randomExpiration,
         strike: parseFloat(randomOption.strike),
         right: optionType,
         price: ocrPrice,
-        trader: 'test', // Mark as test trader
-        priority: 99,
+        trader: mimicTrader, // Use selected trader (elite/brando) - will trigger real copy trade rules!
+        priority: traderPriority,
         timestamp: new Date().toISOString()
       };
 
@@ -3023,8 +3042,9 @@ function setupCopyTradeModal() {
       if (result.success) {
         const strikeFormatted = randomOption.strike % 1 === 0 ? randomOption.strike : randomOption.strike.toFixed(2);
         const optionTypeStr = optionType === 'C' ? 'CALL' : 'PUT';
+        const traderEmoji = mimicTrader === 'elite' ? '🔥' : '💜';
         showTestStatus(
-          `✅ Test signal sent! ${tickerUpper} ${strikeFormatted} ${optionTypeStr} @ $${ocrPrice.toFixed(2)}`,
+          `✅ Test signal sent as ${traderEmoji} ${traderName}! ${tickerUpper} ${strikeFormatted} ${optionTypeStr} @ $${ocrPrice.toFixed(2)}`,
           'success'
         );
       } else {
@@ -3040,6 +3060,8 @@ function setupCopyTradeModal() {
   if (startTestBtn) {
     startTestBtn.addEventListener('click', () => {
       const ticker = testTickerInput.value.trim().toUpperCase();
+      const mimicTraderSelect = document.getElementById('testMimicTrader');
+      const mimicTrader = mimicTraderSelect ? mimicTraderSelect.value : 'elite';
 
       if (!ticker) {
         showTestStatus('❌ Please enter a ticker', 'error');
@@ -3055,7 +3077,8 @@ function setupCopyTradeModal() {
       let countdown = 30;
       testTimerDisplay.textContent = `${countdown}s`;
 
-      showTestStatus(`⏱️ Test started! Signal will be sent in ${countdown} seconds...`, 'info');
+      const traderName = mimicTrader === 'elite' ? '🔥 Elite Trades' : '💜 Brando + Shoof';
+      showTestStatus(`⏱️ Test started! Signal will be sent as ${traderName} in ${countdown} seconds...`, 'info');
 
       // Clear any existing interval
       if (testCountdownInterval) {
@@ -3072,8 +3095,8 @@ function setupCopyTradeModal() {
           testCountdownInterval = null;
           testTimerDisplay.style.display = 'none';
 
-          // Generate and send test signal
-          generateTestSignal(ticker).then(() => {
+          // Generate and send test signal with selected trader
+          generateTestSignal(ticker, mimicTrader).then(() => {
             // Re-enable button after 3 seconds
             setTimeout(() => {
               startTestBtn.disabled = false;

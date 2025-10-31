@@ -2956,9 +2956,11 @@ function setupCopyTradeModal() {
       }
 
       // Filter to 0-3 DTE expirations (like the real traders do)
+      // API returns: [{expiration: "20251101", label: "Nov 1 (0 DTE)"}, ...]
       const today = new Date();
-      const expirations = expData.expirations.filter(exp => {
-        const expDate = new Date(exp.slice(0, 4), exp.slice(4, 6) - 1, exp.slice(6, 8));
+      const expirations = expData.expirations.filter(expObj => {
+        const expString = expObj.expiration; // "20251101"
+        const expDate = new Date(expString.slice(0, 4), expString.slice(4, 6) - 1, expString.slice(6, 8));
         const dte = Math.floor((expDate - today) / (1000 * 60 * 60 * 24));
         return dte >= 0 && dte <= 3;
       });
@@ -2967,8 +2969,9 @@ function setupCopyTradeModal() {
         throw new Error('No expirations within 0-3 DTE found');
       }
 
-      // Pick random expiration
-      const randomExpiration = expirations[Math.floor(Math.random() * expirations.length)];
+      // Pick random expiration object
+      const randomExpirationObj = expirations[Math.floor(Math.random() * expirations.length)];
+      const randomExpiration = randomExpirationObj.expiration; // Get the string "20251101"
 
       showTestStatus('📊 Fetching options chain...', 'info');
 

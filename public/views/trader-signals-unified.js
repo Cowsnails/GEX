@@ -2037,7 +2037,40 @@ export function renderTraderSignals() {
               <option value="">Select a trader...</option>
               <option value="elite">🔥 Elite Trades</option>
               <option value="brando">💜 Brando + Shoof</option>
+              <option value="test">🧪 Test Copy Trader</option>
             </select>
+          </div>
+
+          <!-- Test Copy Trader Section (Hidden by default) -->
+          <div id="testCopyTraderSection" style="display: none; border: 2px solid #3b82f6; border-radius: 12px; padding: 16px; margin-top: 16px; background: rgba(59, 130, 246, 0.05);">
+            <div style="font-size: 16px; font-weight: 600; color: #3b82f6; margin-bottom: 12px;">
+              🧪 Test Copy Trader Mode
+            </div>
+            <div style="font-size: 13px; color: #9ca3af; margin-bottom: 16px;">
+              Simulate a fake OCR signal for testing. Select a ticker, click Start Test, and after 30 seconds a random option signal will be copy traded.
+            </div>
+
+            <!-- Test Ticker Input -->
+            <div class="form-group">
+              <label class="form-label">Test Ticker</label>
+              <input type="text" class="form-input" id="testTicker" placeholder="Enter ticker (e.g., QQQ, AAPL)" style="text-transform: uppercase;" maxlength="10" />
+              <div class="form-hint">Enter one of the 190+ tickers in the options universe</div>
+            </div>
+
+            <!-- Test Button and Timer -->
+            <div style="display: flex; gap: 12px; align-items: center;">
+              <button class="manual-entry-modal-btn buy" id="startTestBtn" style="flex: 1;">
+                🚀 Start Test
+              </button>
+              <div id="testTimerDisplay" style="display: none; font-size: 24px; font-weight: 700; color: #3b82f6; min-width: 80px; text-align: center;">
+                30s
+              </div>
+            </div>
+
+            <!-- Test Status Message -->
+            <div id="testStatusMessage" style="margin-top: 12px; padding: 12px; border-radius: 8px; display: none;">
+              <!-- Status messages appear here -->
+            </div>
           </div>
 
           <!-- Ticker Filter -->
@@ -2803,14 +2836,273 @@ function setupCopyTradeModal() {
     addBtn.disabled = !trader || !amount || amount <= 0;
   };
 
-  traderSelect.addEventListener('change', validateForm);
+  // Handle trader selection change - show/hide test mode
+  const handleTraderChange = () => {
+    const trader = traderSelect.value;
+    const testSection = document.getElementById('testCopyTraderSection');
+    const normalFields = document.querySelectorAll('.form-group:not(#testCopyTraderSection)');
+
+    if (trader === 'test') {
+      // Show test section, hide normal copy trade fields
+      testSection.style.display = 'block';
+      // Hide ticker filter, trading hours, and amount fields
+      const tickerFilterGroup = document.querySelector('.form-group:has(#copyTickerInput)');
+      const tradingHoursGroup = document.querySelector('.form-group:has(#copyStartTime)');
+      const amountGroup = document.querySelector('.form-group:has(#copyAmount)');
+      const activeCopyTradesGroup = document.getElementById('activeCopyTradesGroup');
+
+      if (tickerFilterGroup) tickerFilterGroup.style.display = 'none';
+      if (tradingHoursGroup) tradingHoursGroup.style.display = 'none';
+      if (amountGroup) amountGroup.style.display = 'none';
+      if (activeCopyTradesGroup) activeCopyTradesGroup.style.display = 'none';
+
+      // Hide the add copy trade button
+      addBtn.style.display = 'none';
+    } else {
+      // Hide test section, show normal fields
+      testSection.style.display = 'none';
+      const tickerFilterGroup = document.querySelector('.form-group:has(#copyTickerInput)');
+      const tradingHoursGroup = document.querySelector('.form-group:has(#copyStartTime)');
+      const amountGroup = document.querySelector('.form-group:has(#copyAmount)');
+
+      if (tickerFilterGroup) tickerFilterGroup.style.display = 'block';
+      if (tradingHoursGroup) tradingHoursGroup.style.display = 'block';
+      if (amountGroup) amountGroup.style.display = 'block';
+
+      // Show the add copy trade button
+      addBtn.style.display = 'inline-block';
+
+      // Re-load active copy trades if modal is open
+      const modal = document.getElementById('copyTradeModal');
+      if (modal && modal.classList.contains('active')) {
+        loadActiveCopyTrades();
+      }
+    }
+
+    validateForm();
+  };
+
+  traderSelect.addEventListener('change', handleTraderChange);
   amountInput.addEventListener('input', validateForm);
+
+  // Test Copy Trader functionality
+  const startTestBtn = document.getElementById('startTestBtn');
+  const testTimerDisplay = document.getElementById('testTimerDisplay');
+  const testStatusMessage = document.getElementById('testStatusMessage');
+  const testTickerInput = document.getElementById('testTicker');
+
+  let testCountdownInterval = null;
+
+  const showTestStatus = (message, type = 'info') => {
+    testStatusMessage.style.display = 'block';
+    testStatusMessage.textContent = message;
+
+    if (type === 'success') {
+      testStatusMessage.style.background = 'rgba(16, 185, 129, 0.1)';
+      testStatusMessage.style.border = '1px solid #10b981';
+      testStatusMessage.style.color = '#10b981';
+    } else if (type === 'error') {
+      testStatusMessage.style.background = 'rgba(239, 68, 68, 0.1)';
+      testStatusMessage.style.border = '1px solid #ef4444';
+      testStatusMessage.style.color = '#ef4444';
+    } else {
+      testStatusMessage.style.background = 'rgba(59, 130, 246, 0.1)';
+      testStatusMessage.style.border = '1px solid #3b82f6';
+      testStatusMessage.style.color = '#3b82f6';
+    }
+  };
+
+  const generateTestSignal = async (ticker) => {
+    try {
+      // Validate ticker is in universe
+      const tickerUpper = ticker.toUpperCase().trim();
+      if (!tickerUpper) {
+        throw new Error('Please enter a ticker');
+      }
+
+      showTestStatus('🔍 Fetching expiration dates...', 'info');
+
+      // Fetch available expirations for ticker
+      const expResponse = await fetch(`/api/options/expirations?root=${tickerUpper}`, {
+        credentials: 'include'
+      });
+
+      if (!expResponse.ok) {
+        throw new Error('Failed to fetch expirations for ticker');
+      }
+
+      const expData = await expResponse.json();
+      if (!expData.success || !expData.expirations || expData.expirations.length === 0) {
+        throw new Error(`No options data available for ${tickerUpper}`);
+      }
+
+      // Filter to 0-3 DTE expirations (like the real traders do)
+      const today = new Date();
+      const expirations = expData.expirations.filter(exp => {
+        const expDate = new Date(exp.slice(0, 4), exp.slice(4, 6) - 1, exp.slice(6, 8));
+        const dte = Math.floor((expDate - today) / (1000 * 60 * 60 * 24));
+        return dte >= 0 && dte <= 3;
+      });
+
+      if (expirations.length === 0) {
+        throw new Error('No expirations within 0-3 DTE found');
+      }
+
+      // Pick random expiration
+      const randomExpiration = expirations[Math.floor(Math.random() * expirations.length)];
+
+      showTestStatus('📊 Fetching options chain...', 'info');
+
+      // Fetch current stock price and options for that expiration
+      const chainResponse = await fetch(`/api/options/chain?root=${tickerUpper}&expiration=${randomExpiration}`, {
+        credentials: 'include'
+      });
+
+      if (!chainResponse.ok) {
+        throw new Error('Failed to fetch options chain');
+      }
+
+      const chainData = await chainResponse.json();
+      if (!chainData.success || !chainData.options || chainData.options.length === 0) {
+        throw new Error('No options data available for selected expiration');
+      }
+
+      // Get current stock price
+      const stockPrice = chainData.stockPrice || chainData.options[0]?.underlyingPrice || 100;
+
+      // Randomly choose CALL or PUT
+      const optionType = Math.random() > 0.5 ? 'C' : 'P';
+
+      // Filter to selected option type
+      const filteredOptions = chainData.options.filter(opt => opt.right === optionType);
+
+      if (filteredOptions.length === 0) {
+        throw new Error(`No ${optionType === 'C' ? 'CALL' : 'PUT'} options found`);
+      }
+
+      // Find strikes near ATM (within $10 of stock price)
+      const nearATMOptions = filteredOptions.filter(opt =>
+        Math.abs(opt.strike - stockPrice) <= 10
+      );
+
+      const optionsToChoose = nearATMOptions.length > 0 ? nearATMOptions : filteredOptions;
+
+      // Pick random strike
+      const randomOption = optionsToChoose[Math.floor(Math.random() * optionsToChoose.length)];
+
+      // Use ASK price (what you pay to BUY) as the OCR price
+      const ocrPrice = randomOption.ask && randomOption.ask > 0 ? randomOption.ask :
+                       (randomOption.mid && randomOption.mid > 0 ? randomOption.mid :
+                       (randomOption.bid && randomOption.bid > 0 ? randomOption.bid : 0.50));
+
+      // Generate test signal in OCR format
+      const testSignal = {
+        root: tickerUpper,
+        expiration: randomExpiration,
+        strike: parseFloat(randomOption.strike),
+        right: optionType,
+        price: ocrPrice,
+        trader: 'test', // Mark as test trader
+        priority: 99,
+        timestamp: new Date().toISOString()
+      };
+
+      showTestStatus('🚀 Sending test signal to server...', 'info');
+
+      // Send to server (same endpoint as real OCR)
+      const response = await fetch('/api/trade-signal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(testSignal)
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        const strikeFormatted = randomOption.strike % 1 === 0 ? randomOption.strike : randomOption.strike.toFixed(2);
+        const optionTypeStr = optionType === 'C' ? 'CALL' : 'PUT';
+        showTestStatus(
+          `✅ Test signal sent! ${tickerUpper} ${strikeFormatted} ${optionTypeStr} @ $${ocrPrice.toFixed(2)}`,
+          'success'
+        );
+      } else {
+        throw new Error(result.error || 'Server rejected test signal');
+      }
+
+    } catch (error) {
+      console.error('Test signal error:', error);
+      showTestStatus(`❌ Error: ${error.message}`, 'error');
+    }
+  };
+
+  if (startTestBtn) {
+    startTestBtn.addEventListener('click', () => {
+      const ticker = testTickerInput.value.trim().toUpperCase();
+
+      if (!ticker) {
+        showTestStatus('❌ Please enter a ticker', 'error');
+        return;
+      }
+
+      // Disable button during test
+      startTestBtn.disabled = true;
+      startTestBtn.textContent = '⏳ Test Running...';
+
+      // Show timer
+      testTimerDisplay.style.display = 'block';
+      let countdown = 30;
+      testTimerDisplay.textContent = `${countdown}s`;
+
+      showTestStatus(`⏱️ Test started! Signal will be sent in ${countdown} seconds...`, 'info');
+
+      // Clear any existing interval
+      if (testCountdownInterval) {
+        clearInterval(testCountdownInterval);
+      }
+
+      // Start countdown
+      testCountdownInterval = setInterval(() => {
+        countdown--;
+        testTimerDisplay.textContent = `${countdown}s`;
+
+        if (countdown <= 0) {
+          clearInterval(testCountdownInterval);
+          testCountdownInterval = null;
+          testTimerDisplay.style.display = 'none';
+
+          // Generate and send test signal
+          generateTestSignal(ticker).then(() => {
+            // Re-enable button after 3 seconds
+            setTimeout(() => {
+              startTestBtn.disabled = false;
+              startTestBtn.textContent = '🚀 Start Test';
+            }, 3000);
+          });
+        }
+      }, 1000);
+    });
+  }
 
   // Cancel button
   cancelBtn.addEventListener('click', () => {
     modal.classList.remove('active');
     window.selectedCopyTickers = [];
     renderTickerChips();
+
+    // Clean up test timer if running
+    if (testCountdownInterval) {
+      clearInterval(testCountdownInterval);
+      testCountdownInterval = null;
+    }
+    if (testTimerDisplay) {
+      testTimerDisplay.style.display = 'none';
+    }
+    if (startTestBtn) {
+      startTestBtn.disabled = false;
+      startTestBtn.textContent = '🚀 Start Test';
+    }
   });
 
   // Add copy trade rule
@@ -2824,6 +3116,19 @@ function setupCopyTradeModal() {
       modal.classList.remove('active');
       window.selectedCopyTickers = [];
       renderTickerChips();
+
+      // Clean up test timer if running
+      if (testCountdownInterval) {
+        clearInterval(testCountdownInterval);
+        testCountdownInterval = null;
+      }
+      if (testTimerDisplay) {
+        testTimerDisplay.style.display = 'none';
+      }
+      if (startTestBtn) {
+        startTestBtn.disabled = false;
+        startTestBtn.textContent = '🚀 Start Test';
+      }
     }
   });
 

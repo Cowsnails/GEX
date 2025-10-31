@@ -400,6 +400,7 @@ async function processCopyTrades(signal) {
       // Fetch CURRENT contract price (not stale OCR price)
       let currentPrice = null;
       try {
+        console.log(`🤖 [STEP 1] Fetching current price from ThetaData...`);
         const THETA_HTTP = "http://127.0.0.1:25510";
         const quoteUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
 
@@ -419,6 +420,8 @@ async function processCopyTrades(signal) {
         console.error(`❌ Error fetching current price for copy trade:`, priceError);
       }
 
+      console.log(`🤖 [STEP 2] Using price: $${currentPrice || signal.entryPrice || signal.ocrPrice}`);
+
       // Fallback to OCR price if current price unavailable
       if (!currentPrice) {
         currentPrice = signal.entryPrice || signal.ocrPrice;
@@ -430,12 +433,19 @@ async function processCopyTrades(signal) {
         continue;
       }
 
+      console.log(`🤖 [STEP 3] Calculating quantity with amount=$${rule.amount_per_trade}, price=$${currentPrice}`);
+
       // Calculate quantity based on amount per trade
       const quantity = Math.floor(rule.amount_per_trade / (currentPrice * 100));
+
+      console.log(`🤖 [STEP 4] Calculated quantity: ${quantity} contracts`);
+
       if (quantity <= 0) {
         console.error(`❌ Insufficient amount to purchase contract ($${rule.amount_per_trade} / $${currentPrice * 100})`);
         continue;
       }
+
+      console.log(`🤖 [STEP 5] Executing order via ${rule.trading_mode} mode...`);
 
       // Execute order via broker using rule's trading_mode
       try {

@@ -3009,12 +3009,17 @@ function setupCopyTradeModal() {
         throw new Error(`No ${optionType === 'C' ? 'CALL' : 'PUT'} options found`);
       }
 
-      // Find strikes near ATM (within $10 of stock price)
+      // Find strikes near ATM (within 2% of stock price for realistic trading)
+      // For $475 stock: 2% = $9.50 range ($465.50 to $484.50)
+      // For $150 stock: 2% = $3.00 range ($147 to $153)
+      const priceRange = stockPrice * 0.02; // 2% of stock price
       const nearATMOptions = filteredOptions.filter(opt =>
-        Math.abs(opt.strike - stockPrice) <= 10
+        Math.abs(opt.strike - stockPrice) <= priceRange
       );
 
       const optionsToChoose = nearATMOptions.length > 0 ? nearATMOptions : filteredOptions;
+
+      console.log(`📊 Stock price: $${stockPrice.toFixed(2)}, Range: ±$${priceRange.toFixed(2)} (2%), Found ${nearATMOptions.length} near-ATM options`);
 
       // Pick random strike
       const randomOption = optionsToChoose[Math.floor(Math.random() * optionsToChoose.length)];

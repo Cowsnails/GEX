@@ -324,14 +324,6 @@ global.broadcastToAllUsers = function(message) {
 // 🤖 COPY TRADE PROCESSOR - Check and execute copy trades for incoming signals
 async function processCopyTrades(signal) {
   try {
-    console.log(`🤖 [COPY TRADE] Processing signal:`, {
-      id: signal.id,
-      trader: signal.trader,
-      root: signal.root,
-      strike: signal.strike,
-      right: signal.right
-    });
-
     // Get current time
     const now = new Date();
     const currentHour = now.getHours();
@@ -346,31 +338,8 @@ async function processCopyTrades(signal) {
     `);
     const matchingRules = stmt.all(signal.trader, signal.root);
 
-    console.log(`🤖 [COPY TRADE] Found ${matchingRules.length} matching rule(s) for trader='${signal.trader}' root='${signal.root}'`);
-
-    if (matchingRules.length > 0) {
-      console.log(`🤖 [COPY TRADE] Matching rules:`, matchingRules.map(r => ({
-        id: r.id,
-        user_id: r.user_id,
-        trader: r.trader,
-        ticker: r.ticker,
-        trading_mode: r.trading_mode,
-        amount_per_trade: r.amount_per_trade
-      })));
-    }
-
     if (matchingRules.length === 0) {
-      console.log(`🤖 [COPY TRADE] No copy trade rules match signal ${signal.id}`);
-
-      // Debug: Show all enabled rules to help troubleshooting
-      const allRules = db.prepare('SELECT * FROM copy_trade_settings WHERE enabled = 1').all();
-      console.log(`🤖 [COPY TRADE] All enabled rules in database:`, allRules.map(r => ({
-        id: r.id,
-        user_id: r.user_id,
-        trader: r.trader,
-        ticker: r.ticker
-      })));
-
+      console.log(`🤖 No copy trade rules match signal ${signal.id}`);
       return;
     }
 
@@ -397,50 +366,33 @@ async function processCopyTrades(signal) {
 
       console.log(`🤖 Executing copy trade for user ${rule.user_id}: ${signal.root} ${signal.strike}${signal.right}`);
 
-      // Fetch CURRENT contract data from ThetaData (reuse for price and broker)
-      let currentPrice = null;
-      let contractOption = null;
-      let stockPrice = null;
+      // Get user session to access broker
+      const userSession = UserManager.getUserById(rule.user_id);
+      if (!userSession) {
+        console.error(`❌ User ${rule.user_id} not found for copy trade`);
+        continue;
+      }
 
+      // Fetch CURRENT contract price (not stale OCR price)
+      let currentPrice = null;
       try {
-        console.log(`🤖 [STEP 1] Fetching contract data from ThetaData...`);
-        const THETA_HTTP = "http://127.0.0.1:25510";
-        const quoteUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
+        const quoteUrl = `${process.env.THETA_HTTP_API || 'https://api.theta.com'}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
 
         const quoteResponse = await fetch(quoteUrl);
         if (quoteResponse.ok) {
           const quoteData = await quoteResponse.json();
           if (quoteData.response && quoteData.response.length > 0) {
             const ticks = quoteData.response[0];
-
-            // Extract all data we need
-            const bid = ticks[3] / 1000 || 0;
-            const ask = ticks[7] / 1000 || 0;
-            stockPrice = ticks[10] / 1000 || 100;
-
-            // Create option object for InternalPaperBroker
-            contractOption = {
-              strike: signal.strike,
-              right: signal.right,
-              bid: bid,
-              ask: ask,
-              mid: (bid + ask) / 2,
-              underlyingPrice: stockPrice,
-              expiration: signal.expiration,
-              root: signal.root
-            };
-
+            const ask = ticks[7] || 0; // Use ASK price for buy orders
             if (ask > 0) {
               currentPrice = ask;
-              console.log(`🤖 Fetched contract: ask=$${currentPrice}, bid=$${bid}, stock=$${stockPrice}`);
+              console.log(`🤖 Current contract price: $${currentPrice}`);
             }
           }
         }
       } catch (priceError) {
-        console.error(`❌ Error fetching contract for copy trade:`, priceError);
+        console.error(`❌ Error fetching current price for copy trade:`, priceError);
       }
-
-      console.log(`🤖 [STEP 2] Using price: $${currentPrice || signal.entryPrice || signal.ocrPrice}`);
 
       // Fallback to OCR price if current price unavailable
       if (!currentPrice) {
@@ -453,19 +405,12 @@ async function processCopyTrades(signal) {
         continue;
       }
 
-      console.log(`🤖 [STEP 3] Calculating quantity with amount=$${rule.amount_per_trade}, price=$${currentPrice}`);
-
       // Calculate quantity based on amount per trade
       const quantity = Math.floor(rule.amount_per_trade / (currentPrice * 100));
-
-      console.log(`🤖 [STEP 4] Calculated quantity: ${quantity} contracts`);
-
       if (quantity <= 0) {
         console.error(`❌ Insufficient amount to purchase contract ($${rule.amount_per_trade} / $${currentPrice * 100})`);
         continue;
       }
-
-      console.log(`🤖 [STEP 5] Executing order via ${rule.trading_mode} mode...`);
 
       // Execute order via broker using rule's trading_mode
       try {
@@ -528,30 +473,28 @@ async function processCopyTrades(signal) {
 
         } else {
           // Handle paper/live modes via broker
-          console.log(`🤖 Using internal paper broker in ${tradingMode.toUpperCase()} mode for copy trade (user ${rule.user_id})`);
+          let broker;
 
-          // Reuse contract data we already fetched (no second fetch needed!)
-          if (!contractOption) {
-            console.error(`❌ No contract data available for copy trade execution`);
-            continue;
+          if (userSession.broker === 'alpaca') {
+            // Use Alpaca broker with the trading_mode specified in the rule
+            broker = new AlpacaBroker(userSession.alpacaKey, userSession.alpacaSecret, tradingMode);
+            console.log(`🤖 Using Alpaca broker in ${tradingMode.toUpperCase()} mode for copy trade`);
+          } else {
+            // Use internal paper broker
+            broker = new InternalPaperBroker(rule.user_id);
+            console.log(`🤖 Using internal paper broker for copy trade`);
           }
 
-          console.log(`🤖 Using contract data from STEP 1 (no duplicate fetch)`);
-
-          const orderData = {
+          var orderResult = await broker.placeOrder({
             symbol: signal.root,
             strike: signal.strike,
+            right: signal.right,
             expiration: signal.expiration,
-            direction: signal.right === 'C' ? 'CALL' : 'PUT',
-            optionsData: [contractOption], // Pass array with the one option we need
-            currentPrice: stockPrice,
-            cashAmount: rule.amount_per_trade,
-            isManual: false,
-            premiumPrice: currentPrice
-          };
-
-          // InternalPaperBroker has static methods, not instance methods
-          var orderResult = await InternalPaperBroker.placeOrder(rule.user_id, orderData);
+            quantity: quantity,
+            side: 'buy',
+            orderType: 'market',
+            limitPrice: null
+          });
 
           if (orderResult.success) {
             console.log(`✅ Copy trade executed for user ${rule.user_id}: ${quantity} contracts @ $${currentPrice}`);

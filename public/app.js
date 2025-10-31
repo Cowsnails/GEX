@@ -33,6 +33,9 @@ export function initWebSocket() {
     return;
   }
 
+  // 🔒 Reset signal stream flag when creating new WebSocket
+  window.signalStreamConnected = false;
+
   const ws = new WebSocket('ws://localhost:3000/ws');
   window.appState.ws = ws;
 

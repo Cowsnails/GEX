@@ -5521,8 +5521,15 @@ function connectToSignalStream() {
     return;
   }
 
+  // 🔒 Prevent duplicate event listener registration
+  if (window.signalStreamConnected) {
+    console.log('✅ Signal stream already connected');
+    return;
+  }
+
   const ws = window.appState.ws;
-  
+  window.signalStreamConnected = true;
+
   ws.addEventListener('message', function(event) {
     try {
       const data = JSON.parse(event.data);
@@ -5628,7 +5635,7 @@ function connectToSignalStream() {
               const premiumDisplay = document.getElementById('premiumGroup');
 
               if (premiumEl) {
-                const newValue = '$' + newPrice.toFixed(2);
+                const newValue = '$' + enrichedData.currentPrice.toFixed(2);
 
                 // Throttle to 500ms (half second) - 2 updates per second max
                 const now = Date.now();

@@ -397,10 +397,13 @@ async function processCopyTrades(signal) {
 
       console.log(`🤖 Executing copy trade for user ${rule.user_id}: ${signal.root} ${signal.strike}${signal.right}`);
 
-      // Fetch CURRENT contract price (not stale OCR price)
+      // Fetch CURRENT contract data from ThetaData (reuse for price and broker)
       let currentPrice = null;
+      let contractOption = null;
+      let stockPrice = null;
+
       try {
-        console.log(`🤖 [STEP 1] Fetching current price from ThetaData...`);
+        console.log(`🤖 [STEP 1] Fetching contract data from ThetaData...`);
         const THETA_HTTP = "http://127.0.0.1:25510";
         const quoteUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
 
@@ -409,15 +412,32 @@ async function processCopyTrades(signal) {
           const quoteData = await quoteResponse.json();
           if (quoteData.response && quoteData.response.length > 0) {
             const ticks = quoteData.response[0];
-            const ask = ticks[7] || 0; // Use ASK price for buy orders
+
+            // Extract all data we need
+            const bid = ticks[3] / 1000 || 0;
+            const ask = ticks[7] / 1000 || 0;
+            stockPrice = ticks[10] / 1000 || 100;
+
+            // Create option object for InternalPaperBroker
+            contractOption = {
+              strike: signal.strike,
+              right: signal.right,
+              bid: bid,
+              ask: ask,
+              mid: (bid + ask) / 2,
+              underlyingPrice: stockPrice,
+              expiration: signal.expiration,
+              root: signal.root
+            };
+
             if (ask > 0) {
               currentPrice = ask;
-              console.log(`🤖 Current contract price: $${currentPrice}`);
+              console.log(`🤖 Fetched contract: ask=$${currentPrice}, bid=$${bid}, stock=$${stockPrice}`);
             }
           }
         }
       } catch (priceError) {
-        console.error(`❌ Error fetching current price for copy trade:`, priceError);
+        console.error(`❌ Error fetching contract for copy trade:`, priceError);
       }
 
       console.log(`🤖 [STEP 2] Using price: $${currentPrice || signal.entryPrice || signal.ocrPrice}`);
@@ -510,37 +530,20 @@ async function processCopyTrades(signal) {
           // Handle paper/live modes via broker
           console.log(`🤖 Using internal paper broker in ${tradingMode.toUpperCase()} mode for copy trade (user ${rule.user_id})`);
 
-          // Fetch options chain for the broker (it needs the full chain to find the option)
-          let optionsData = [];
-          let stockPrice = null;
-          try {
-            const THETA_HTTP = "http://127.0.0.1:25510";
-            const chainUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}`;
-            const chainResponse = await fetch(chainUrl);
-
-            if (chainResponse.ok) {
-              const chainData = await chainResponse.json();
-              if (chainData.response && chainData.response.length > 0) {
-                optionsData = chainData.response;
-                stockPrice = optionsData[0]?.underlyingPrice || 100;
-                console.log(`🤖 Fetched ${optionsData.length} options for broker, stock price: $${stockPrice}`);
-              }
-            }
-          } catch (chainError) {
-            console.error(`❌ Error fetching options chain for copy trade:`, chainError);
-          }
-
-          if (optionsData.length === 0) {
-            console.error(`❌ No options data available for copy trade execution`);
+          // Reuse contract data we already fetched (no second fetch needed!)
+          if (!contractOption) {
+            console.error(`❌ No contract data available for copy trade execution`);
             continue;
           }
+
+          console.log(`🤖 Using contract data from STEP 1 (no duplicate fetch)`);
 
           const orderData = {
             symbol: signal.root,
             strike: signal.strike,
             expiration: signal.expiration,
             direction: signal.right === 'C' ? 'CALL' : 'PUT',
-            optionsData: optionsData,
+            optionsData: [contractOption], // Pass array with the one option we need
             currentPrice: stockPrice,
             cashAmount: rule.amount_per_trade,
             isManual: false,

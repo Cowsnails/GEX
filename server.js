@@ -324,6 +324,14 @@ global.broadcastToAllUsers = function(message) {
 // 🤖 COPY TRADE PROCESSOR - Check and execute copy trades for incoming signals
 async function processCopyTrades(signal) {
   try {
+    console.log(`🤖 [COPY TRADE] Processing signal:`, {
+      id: signal.id,
+      trader: signal.trader,
+      root: signal.root,
+      strike: signal.strike,
+      right: signal.right
+    });
+
     // Get current time
     const now = new Date();
     const currentHour = now.getHours();
@@ -338,8 +346,31 @@ async function processCopyTrades(signal) {
     `);
     const matchingRules = stmt.all(signal.trader, signal.root);
 
+    console.log(`🤖 [COPY TRADE] Found ${matchingRules.length} matching rule(s) for trader='${signal.trader}' root='${signal.root}'`);
+
+    if (matchingRules.length > 0) {
+      console.log(`🤖 [COPY TRADE] Matching rules:`, matchingRules.map(r => ({
+        id: r.id,
+        user_id: r.user_id,
+        trader: r.trader,
+        ticker: r.ticker,
+        trading_mode: r.trading_mode,
+        amount_per_trade: r.amount_per_trade
+      })));
+    }
+
     if (matchingRules.length === 0) {
-      console.log(`🤖 No copy trade rules match signal ${signal.id}`);
+      console.log(`🤖 [COPY TRADE] No copy trade rules match signal ${signal.id}`);
+
+      // Debug: Show all enabled rules to help troubleshooting
+      const allRules = db.prepare('SELECT * FROM copy_trade_settings WHERE enabled = 1').all();
+      console.log(`🤖 [COPY TRADE] All enabled rules in database:`, allRules.map(r => ({
+        id: r.id,
+        user_id: r.user_id,
+        trader: r.trader,
+        ticker: r.ticker
+      })));
+
       return;
     }
 

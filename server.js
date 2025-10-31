@@ -500,15 +500,41 @@ async function processCopyTrades(signal) {
           // Handle paper/live modes via broker
           console.log(`🤖 Using internal paper broker in ${tradingMode.toUpperCase()} mode for copy trade (user ${rule.user_id})`);
 
+          // Fetch options chain for the broker (it needs the full chain to find the option)
+          let optionsData = [];
+          let stockPrice = null;
+          try {
+            const THETA_HTTP = "http://127.0.0.1:25510";
+            const chainUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}`;
+            const chainResponse = await fetch(chainUrl);
+
+            if (chainResponse.ok) {
+              const chainData = await chainResponse.json();
+              if (chainData.response && chainData.response.length > 0) {
+                optionsData = chainData.response;
+                stockPrice = optionsData[0]?.underlyingPrice || 100;
+                console.log(`🤖 Fetched ${optionsData.length} options for broker, stock price: $${stockPrice}`);
+              }
+            }
+          } catch (chainError) {
+            console.error(`❌ Error fetching options chain for copy trade:`, chainError);
+          }
+
+          if (optionsData.length === 0) {
+            console.error(`❌ No options data available for copy trade execution`);
+            continue;
+          }
+
           const orderData = {
             symbol: signal.root,
             strike: signal.strike,
-            right: signal.right,
             expiration: signal.expiration,
-            quantity: quantity,
-            side: 'buy',
-            orderType: 'market',
-            limitPrice: null
+            direction: signal.right === 'C' ? 'CALL' : 'PUT',
+            optionsData: optionsData,
+            currentPrice: stockPrice,
+            cashAmount: rule.amount_per_trade,
+            isManual: false,
+            premiumPrice: currentPrice
           };
 
           // InternalPaperBroker has static methods, not instance methods

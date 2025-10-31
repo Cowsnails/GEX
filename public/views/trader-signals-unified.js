@@ -3019,10 +3019,24 @@ function setupCopyTradeModal() {
       // Pick random strike
       const randomOption = optionsToChoose[Math.floor(Math.random() * optionsToChoose.length)];
 
-      // Use ASK price (what you pay to BUY) as the OCR price
-      const ocrPrice = randomOption.ask && randomOption.ask > 0 ? randomOption.ask :
-                       (randomOption.mid && randomOption.mid > 0 ? randomOption.mid :
-                       (randomOption.bid && randomOption.bid > 0 ? randomOption.bid : 0.50));
+      // Use MID price for OCR to match server validation
+      // Server validates against marketMid = (bid + ask) / 2
+      // So we should use MID to avoid rejection
+      let ocrPrice;
+
+      if (randomOption.mid && randomOption.mid > 0) {
+        ocrPrice = randomOption.mid;
+      } else if (randomOption.bid > 0 && randomOption.ask > 0) {
+        ocrPrice = (randomOption.bid + randomOption.ask) / 2;
+      } else if (randomOption.ask && randomOption.ask > 0) {
+        ocrPrice = randomOption.ask;
+      } else if (randomOption.bid && randomOption.bid > 0) {
+        ocrPrice = randomOption.bid;
+      } else {
+        ocrPrice = 0.50; // Fallback
+      }
+
+      console.log('🧪 Test signal using MID price:', ocrPrice, 'from option:', randomOption);
 
       // Generate test signal in OCR format - EXACTLY like real OCR signals
       const testSignal = {

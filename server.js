@@ -400,7 +400,8 @@ async function processCopyTrades(signal) {
       // Fetch CURRENT contract price (not stale OCR price)
       let currentPrice = null;
       try {
-        const quoteUrl = `${process.env.THETA_HTTP_API || 'https://api.theta.com'}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
+        const THETA_HTTP = "http://127.0.0.1:25510";
+        const quoteUrl = `${THETA_HTTP}/v2/snapshot/option/quote?root=${signal.root}&exp=${signal.expiration}&strike=${parseFloat(signal.strike) * 1000}&right=${signal.right === 'C' ? 'CALL' : 'PUT'}`;
 
         const quoteResponse = await fetch(quoteUrl);
         if (quoteResponse.ok) {
@@ -497,12 +498,9 @@ async function processCopyTrades(signal) {
 
         } else {
           // Handle paper/live modes via broker
-          // 🔧 Note: Broker credentials lookup would be needed for Alpaca integration
-          // For now, using internal paper broker for all paper/live copy trades
-          let broker = new InternalPaperBroker(rule.user_id);
           console.log(`🤖 Using internal paper broker in ${tradingMode.toUpperCase()} mode for copy trade (user ${rule.user_id})`);
 
-          var orderResult = await broker.placeOrder({
+          const orderData = {
             symbol: signal.root,
             strike: signal.strike,
             right: signal.right,
@@ -511,7 +509,10 @@ async function processCopyTrades(signal) {
             side: 'buy',
             orderType: 'market',
             limitPrice: null
-          });
+          };
+
+          // InternalPaperBroker has static methods, not instance methods
+          var orderResult = await InternalPaperBroker.placeOrder(rule.user_id, orderData);
 
           if (orderResult.success) {
             console.log(`✅ Copy trade executed for user ${rule.user_id}: ${quantity} contracts @ $${currentPrice}`);

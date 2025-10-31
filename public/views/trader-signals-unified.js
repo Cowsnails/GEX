@@ -2073,7 +2073,7 @@ export function renderTraderSignals() {
                 🚀 Start Test
               </button>
               <div id="testTimerDisplay" style="display: none; font-size: 24px; font-weight: 700; color: #3b82f6; min-width: 80px; text-align: center;">
-                30s
+                5s
               </div>
             </div>
 
@@ -2941,8 +2941,8 @@ function setupCopyTradeModal() {
 
       showTestStatus(`🔍 Fetching expiration dates for ${tickerUpper}...`, 'info');
 
-      // Fetch available expirations for ticker
-      const expResponse = await fetch(`/api/options/expirations?root=${tickerUpper}`, {
+      // Fetch available expirations for ticker (use correct endpoint)
+      const expResponse = await fetch(`/api/theta/cached-expirations?ticker=${tickerUpper}`, {
         credentials: 'include'
       });
 
@@ -2972,8 +2972,8 @@ function setupCopyTradeModal() {
 
       showTestStatus('📊 Fetching options chain...', 'info');
 
-      // Fetch current stock price and options for that expiration
-      const chainResponse = await fetch(`/api/options/chain?root=${tickerUpper}&expiration=${randomExpiration}`, {
+      // Fetch current stock price and options for that expiration (use correct endpoint)
+      const chainResponse = await fetch(`/api/options-chain?symbol=${tickerUpper}&expiration=${randomExpiration}`, {
         credentials: 'include'
       });
 
@@ -2982,18 +2982,25 @@ function setupCopyTradeModal() {
       }
 
       const chainData = await chainResponse.json();
-      if (!chainData.success || !chainData.options || chainData.options.length === 0) {
+
+      // Parse response from ThetaData format
+      if (!chainData.response || chainData.response.length === 0) {
         throw new Error('No options data available for selected expiration');
       }
 
-      // Get current stock price
-      const stockPrice = chainData.stockPrice || chainData.options[0]?.underlyingPrice || 100;
+      const optionsData = chainData.response;
+
+      // Store all options for later use
+      window.currentStrikeOptions = optionsData;
+
+      // Get current stock price from the first option's underlying price
+      const stockPrice = optionsData[0]?.underlyingPrice || 100;
 
       // Randomly choose CALL or PUT
       const optionType = Math.random() > 0.5 ? 'C' : 'P';
 
       // Filter to selected option type
-      const filteredOptions = chainData.options.filter(opt => opt.right === optionType);
+      const filteredOptions = optionsData.filter(opt => opt.right === optionType);
 
       if (filteredOptions.length === 0) {
         throw new Error(`No ${optionType === 'C' ? 'CALL' : 'PUT'} options found`);
@@ -3074,7 +3081,7 @@ function setupCopyTradeModal() {
 
       // Show timer
       testTimerDisplay.style.display = 'block';
-      let countdown = 30;
+      let countdown = 5;
       testTimerDisplay.textContent = `${countdown}s`;
 
       const traderName = mimicTrader === 'elite' ? '🔥 Elite Trades' : '💜 Brando + Shoof';

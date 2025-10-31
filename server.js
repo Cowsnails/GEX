@@ -366,13 +366,6 @@ async function processCopyTrades(signal) {
 
       console.log(`🤖 Executing copy trade for user ${rule.user_id}: ${signal.root} ${signal.strike}${signal.right}`);
 
-      // Get user session to access broker
-      const userSession = UserManager.getUserById(rule.user_id);
-      if (!userSession) {
-        console.error(`❌ User ${rule.user_id} not found for copy trade`);
-        continue;
-      }
-
       // Fetch CURRENT contract price (not stale OCR price)
       let currentPrice = null;
       try {
@@ -473,17 +466,9 @@ async function processCopyTrades(signal) {
 
         } else {
           // Handle paper/live modes via broker
-          let broker;
-
-          if (userSession.broker === 'alpaca') {
-            // Use Alpaca broker with the trading_mode specified in the rule
-            broker = new AlpacaBroker(userSession.alpacaKey, userSession.alpacaSecret, tradingMode);
-            console.log(`🤖 Using Alpaca broker in ${tradingMode.toUpperCase()} mode for copy trade`);
-          } else {
-            // Use internal paper broker
-            broker = new InternalPaperBroker(rule.user_id);
-            console.log(`🤖 Using internal paper broker for copy trade`);
-          }
+          // Use internal paper broker for copy trades
+          const broker = new InternalPaperBroker(rule.user_id);
+          console.log(`🤖 Using internal paper broker for copy trade in ${tradingMode.toUpperCase()} mode`);
 
           var orderResult = await broker.placeOrder({
             symbol: signal.root,

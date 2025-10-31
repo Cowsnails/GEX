@@ -1,0 +1,1175 @@
+COMPLETE INSTRUCTIONS: Building a Bulletproof Local Options Backtesting System for 0-7 DTE Strategies
+CRITICAL REQUIREMENTS
+
+NO AWS SERVICES - Everything runs locally
+Use local PostgreSQL or SQLite for data storage (NOT Athena)
+Use Parquet files stored locally for columnar data efficiency
+All processing happens on local machine
+Build in phases - foundation first, then advanced features
+
+
+PHASE 1: DATABASE SCHEMA & POINT-IN-TIME DATA ARCHITECTURE
+Objective: Create a dual-timestamp system preventing look-ahead bias
+Database Choice:
+Use PostgreSQL locally OR SQLite for simpler setup
+- PostgreSQL: Better for large datasets (192 tickers × years of data)
+- SQLite: Easier setup, good for prototyping
+Core Tables to Create:
+1. options_data_pit (Point-In-Time Options Data)
+sqlCREATE TABLE options_data_pit (
+    id BIGSERIAL PRIMARY KEY,
+    
+    -- Critical timestamps for point-in-time
+    timestamp_available BIGINT NOT NULL,  -- When data became available (microseconds)
+    timestamp_recorded BIGINT,            -- When we captured it
+    
+    -- Option identifiers
+    symbol VARCHAR(10) NOT NULL,
+    underlying_symbol VARCHAR(10) NOT NULL,
+    option_type CHAR(1) NOT NULL,         -- 'C' or 'P'
+    strike DECIMAL(10,2) NOT NULL,
+    expiration_timestamp BIGINT NOT NULL,
+    
+    -- Pricing data
+    underlying_price DECIMAL(10,4),
+    bid_price DECIMAL(10,4),
+    ask_price DECIMAL(10,4),
+    mid_price DECIMAL(10,4),
+    last_price DECIMAL(10,4),
+    
+    -- Greeks (MUST use implied volatility)
+    delta DECIMAL(8,6),
+    gamma DECIMAL(8,6),
+    theta DECIMAL(8,6),
+    vega DECIMAL(8,6),
+    rho DECIMAL(8,6),
+    implied_vol DECIMAL(8,6),
+    
+    -- Volume/Interest
+    volume INT,
+    open_interest INT,
+    
+    -- Quality flags
+    bid_ask_spread DECIMAL(10,4),
+    is_stale BOOLEAN DEFAULT FALSE,
+    quote_age_seconds INT,
+    
+    -- Indexes for fast querying
+    INDEX idx_symbol_timestamp (underlying_symbol, timestamp_available),
+    INDEX idx_expiration (expiration_timestamp),
+    INDEX idx_pit_query (underlying_symbol, timestamp_available, expiration_timestamp)
+);
+2. delisted_securities (Survivorship Bias Prevention)
+sqlCREATE TABLE delisted_securities (
+    symbol VARCHAR(10) PRIMARY KEY,
+    listing_date DATE,
+    delisting_date DATE,
+    delisting_reason VARCHAR(50),  -- 'bankruptcy', 'merger', 'acquisition', 'low_price'
+    final_price DECIMAL(10,4),
+    successor_ticker VARCHAR(10)
+);
+3. corporate_actions (Handle splits/dividends properly)
+sqlCREATE TABLE corporate_actions (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(10) NOT NULL,
+    action_type VARCHAR(20) NOT NULL,  -- 'split', 'dividend', 'merger'
+    declaration_date DATE,
+    ex_date DATE NOT NULL,             -- CRITICAL for backtesting
+    record_date DATE,
+    payment_date DATE,
+    split_factor DECIMAL(10,6),
+    dividend_amount DECIMAL(10,4),
+    adjustment_factor DECIMAL(10,6),
+    
+    INDEX idx_symbol_exdate (symbol, ex_date)
+);
+4. index_constituents (S&P 500 historical membership)
+sqlCREATE TABLE index_constituents (
+    id SERIAL PRIMARY KEY,
+    index_name VARCHAR(20) NOT NULL,   -- 'SPX', 'NDX', etc.
+    symbol VARCHAR(10) NOT NULL,
+    date_added DATE NOT NULL,
+    date_removed DATE,                 -- NULL if still member
+    
+    INDEX idx_pit_constituents (index_name, date_added, date_removed)
+);
+5. market_regime_data (VIX, volatility metrics)
+sqlCREATE TABLE market_regime (
+    date DATE PRIMARY KEY,
+    vix_close DECIMAL(6,2),
+    spx_close DECIMAL(10,2),
+    spx_daily_return DECIMAL(8,6),
+    realized_vol_20d DECIMAL(6,4),
+    regime VARCHAR(20)  -- 'low_vol', 'high_vol', 'trending', 'mean_reverting'
+);
+
+PHASE 2: DATA INGESTION & VALIDATION PIPELINE
+Objective: Load your historical data with rigorous quality checks
+Step 1: Create Data Loader Class
+pythonclass PointInTimeDataLoader:
+    """
+    Loads historical options data ensuring point-in-time integrity
+    """
+    def __init__(self, db_connection):
+        self.conn = db_connection
+        
+    def load_options_data(self, csv_path, symbol, date):
+        """
+        Load options chain data with dual timestamps
+        
+        Critical: timestamp_available = quote timestamp from data
+                  timestamp_recorded = when we're loading this (now)
+        """
+        df = pd.read_csv(csv_path)
+        
+        # Validate BEFORE inserting
+        self.validate_greeks(df)
+        self.validate_pricing(df)
+        self.detect_stale_quotes(df)
+        
+        # Add point-in-time timestamps
+        df['timestamp_available'] = pd.to_datetime(df['quote_time']).astype('int64') // 1000  # microseconds
+        df['timestamp_recorded'] = pd.Timestamp.now().value // 1000
+        
+        # Insert into database
+        df.to_sql('options_data_pit', self.conn, if_exists='append', index=False)
+        
+    def validate_greeks(self, df):
+        """
+        CRITICAL validation - bad Greeks = bad backtest
+        """
+        # Delta ranges
+        call_delta_valid = ((df['option_type'] == 'C') & 
+                           (df['delta'] >= 0) & 
+                           (df['delta'] <= 1)).all()
+        put_delta_valid = ((df['option_type'] == 'P') & 
+                          (df['delta'] >= -1) & 
+                          (df['delta'] <= 0)).all()
+        
+        if not (call_delta_valid and put_delta_valid):
+            raise ValueError("Delta validation failed - check your Greeks calculation")
+        
+        # Gamma must be positive
+        if not (df['gamma'] >= 0).all():
+            raise ValueError("Gamma must be positive")
+        
+        # IV valid range
+        if not ((df['implied_vol'] >= 0.01) & (df['implied_vol'] <= 3.0)).all():
+            invalid = df[(df['implied_vol'] < 0.01) | (df['implied_vol'] > 3.0)]
+            print(f"WARNING: {len(invalid)} rows with invalid IV")
+            # Flag but don't reject
+        
+    def validate_pricing(self, df):
+        """
+        Ensure bid <= ask and reasonable spreads
+        """
+        # Bid must be <= Ask
+        if not (df['bid_price'] <= df['ask_price']).all():
+            violations = df[df['bid_price'] > df['ask_price']]
+            raise ValueError(f"Bid > Ask violations: {len(violations)} rows")
+        
+        # Calculate spread percentage
+        df['spread_pct'] = (df['ask_price'] - df['bid_price']) / df['mid_price'] * 100
+        
+        # Flag wide spreads (>50% is suspicious)
+        wide_spreads = df[df['spread_pct'] > 50]
+        if len(wide_spreads) > 0:
+            print(f"WARNING: {len(wide_spreads)} quotes with >50% spread")
+            df.loc[df['spread_pct'] > 50, 'is_stale'] = True
+    
+    def detect_stale_quotes(self, df, current_time):
+        """
+        For 0DTE in final hour: quotes older than 15-30 sec are stale
+        Otherwise: 1-2 minutes
+        """
+        df['quote_age_seconds'] = (current_time - df['quote_time']).dt.total_seconds()
+        
+        # Calculate time to expiration
+        df['hours_to_expiry'] = (df['expiration_timestamp'] - df['timestamp_available']) / (3600 * 1e6)
+        
+        # Dynamic stale thresholds
+        df['stale_threshold'] = np.where(
+            df['hours_to_expiry'] < 1,  # Final hour
+            30,   # 30 seconds for 0DTE final hour
+            120   # 2 minutes otherwise
+        )
+        
+        df['is_stale'] = df['quote_age_seconds'] > df['stale_threshold']
+        
+        stale_count = df['is_stale'].sum()
+        if stale_count > 0:
+            print(f"Flagged {stale_count} stale quotes")
+Step 2: Put-Call Parity Validation
+pythondef validate_put_call_parity(calls_df, puts_df, spot_price, rate=0.043):
+    """
+    Cross-validation using put-call parity
+    Clean data should have <3% violations
+    """
+    violations = []
+    
+    for _, call in calls_df.iterrows():
+        # Find matching put
+        put = puts_df[
+            (puts_df['strike'] == call['strike']) &
+            (puts_df['expiration_timestamp'] == call['expiration_timestamp'])
+        ]
+        
+        if len(put) == 0:
+            continue
+            
+        put = put.iloc[0]
+        
+        # Calculate parity
+        time_to_expiry = (call['expiration_timestamp'] - call['timestamp_available']) / (365 * 24 * 3600 * 1e6)
+        pv_strike = call['strike'] * np.exp(-rate * time_to_expiry)
+        
+        lhs = call['mid_price'] + pv_strike
+        rhs = put['mid_price'] + spot_price
+        
+        deviation_pct = abs(lhs - rhs) / spot_price
+        
+        if deviation_pct > 0.05:  # 5% threshold
+            violations.append({
+                'strike': call['strike'],
+                'deviation_pct': deviation_pct,
+                'call_mid': call['mid_price'],
+                'put_mid': put['mid_price']
+            })
+    
+    violation_rate = len(violations) / len(calls_df)
+    
+    if violation_rate > 0.03:
+        print(f"WARNING: {violation_rate:.1%} put-call parity violations (>3% threshold)")
+    
+    return violations
+
+PHASE 3: EVENT-DRIVEN BACKTESTING ENGINE
+Objective: Build proper event sequencing to prevent look-ahead bias
+Core Architecture:
+pythonfrom queue import Queue
+from enum import Enum
+from dataclasses import dataclass
+from typing import Optional
+import pandas as pd
+import numpy as np
+
+class EventType(Enum):
+    MARKET = 1
+    SIGNAL = 2
+    ORDER = 3
+    FILL = 4
+
+@dataclass
+class MarketEvent:
+    type: EventType = EventType.MARKET
+    timestamp: pd.Timestamp = None
+    data: dict = None  # Options chain data at this timestamp
+
+@dataclass
+class SignalEvent:
+    type: EventType = EventType.SIGNAL
+    symbol: str = None
+    signal_type: str = None  # 'LONG', 'SHORT', 'EXIT'
+    strength: float = None
+    strikes: list = None  # For spreads
+
+@dataclass
+class OrderEvent:
+    type: EventType = EventType.ORDER
+    symbol: str = None
+    order_type: str = None  # 'MARKET', 'LIMIT'
+    quantity: int = None
+    direction: str = None  # 'BUY', 'SELL'
+    strikes: list = None
+    limit_price: Optional[float] = None
+
+@dataclass
+class FillEvent:
+    type: EventType = EventType.FILL
+    symbol: str = None
+    quantity: int = None
+    direction: str = None
+    fill_price: float = None
+    commission: float = None
+    timestamp: pd.Timestamp = None
+    slippage: float = None
+
+
+class DataHandler:
+    """
+    Provides point-in-time market data to backtester
+    """
+    def __init__(self, db_connection, start_date, end_date, symbols):
+        self.conn = db_connection
+        self.start_date = start_date
+        self.end_date = end_date
+        self.symbols = symbols
+        self.current_timestamp = None
+        self.continue_backtest = True
+        
+    def get_latest_bars(self, symbol, N=1):
+        """
+        Returns last N bars of data available at current_timestamp
+        CRITICAL: timestamp_available <= current_timestamp (no future data)
+        """
+        query = f"""
+        SELECT * FROM options_data_pit
+        WHERE underlying_symbol = '{symbol}'
+          AND timestamp_available <= {self.current_timestamp.value // 1000}
+          AND expiration_timestamp > {self.current_timestamp.value // 1000}
+        ORDER BY timestamp_available DESC
+        LIMIT {N}
+        """
+        return pd.read_sql(query, self.conn)
+    
+    def update_bars(self):
+        """
+        Advances to next timestamp and generates MarketEvent
+        """
+        # Get next timestamp from database
+        query = f"""
+        SELECT DISTINCT timestamp_available
+        FROM options_data_pit
+        WHERE timestamp_available > {self.current_timestamp.value // 1000 if self.current_timestamp else 0}
+        ORDER BY timestamp_available
+        LIMIT 1
+        """
+        result = pd.read_sql(query, self.conn)
+        
+        if len(result) == 0:
+            self.continue_backtest = False
+            return None
+        
+        self.current_timestamp = pd.Timestamp(result.iloc[0]['timestamp_available'], unit='us')
+        
+        # Get all options data at this timestamp
+        data = {}
+        for symbol in self.symbols:
+            data[symbol] = self.get_latest_bars(symbol, N=1)
+        
+        return MarketEvent(
+            type=EventType.MARKET,
+            timestamp=self.current_timestamp,
+            data=data
+        )
+
+
+class Strategy:
+    """
+    Base class for trading strategies
+    Generates SignalEvents from MarketEvents
+    """
+    def __init__(self, events_queue, data_handler):
+        self.events = events_queue
+        self.data = data_handler
+        
+    def calculate_signals(self, market_event):
+        """
+        Override this method with your strategy logic
+        MUST use only data from market_event (point-in-time)
+        """
+        raise NotImplementedError()
+
+
+class Portfolio:
+    """
+    Manages positions and converts signals to orders
+    """
+    def __init__(self, events_queue, initial_capital=100000):
+        self.events = events_queue
+        self.initial_capital = initial_capital
+        self.settled_cash = initial_capital
+        self.unsettled_cash = 0
+        self.positions = {}
+        self.pending_settlements = []
+        self.all_holdings = []
+        
+    def update_signal(self, signal_event):
+        """
+        Convert SignalEvent to OrderEvent based on position sizing
+        """
+        # Calculate position size using Kelly criterion
+        position_size = self.calculate_position_size(signal_event)
+        
+        # Check if we have enough capital
+        if position_size * signal_event.strength > self.settled_cash:
+            print(f"Insufficient capital for signal {signal_event.symbol}")
+            return
+        
+        # Generate order
+        order = OrderEvent(
+            type=EventType.ORDER,
+            symbol=signal_event.symbol,
+            order_type='MARKET',
+            quantity=position_size,
+            direction='BUY' if signal_event.signal_type == 'LONG' else 'SELL',
+            strikes=signal_event.strikes
+        )
+        
+        self.events.put(order)
+    
+    def update_fill(self, fill_event):
+        """
+        Update positions and track settlement (T+1)
+        """
+        symbol = fill_event.symbol
+        
+        # Update position
+        if symbol not in self.positions:
+            self.positions[symbol] = {
+                'quantity': 0,
+                'avg_cost': 0,
+                'realized_pnl': 0
+            }
+        
+        if fill_event.direction == 'BUY':
+            self.positions[symbol]['quantity'] += fill_event.quantity
+            cash_impact = -(fill_event.fill_price * fill_event.quantity * 100 + fill_event.commission)
+        else:
+            self.positions[symbol]['quantity'] -= fill_event.quantity
+            cash_impact = (fill_event.fill_price * fill_event.quantity * 100 - fill_event.commission)
+        
+        # Track unsettled cash (settles T+1)
+        self.unsettled_cash += cash_impact
+        settlement_date = fill_event.timestamp + pd.Timedelta(days=1)
+        self.pending_settlements.append({
+            'amount': cash_impact,
+            'settlement_date': settlement_date
+        })
+    
+    def process_settlements(self, current_date):
+        """
+        Move unsettled cash to settled on T+1
+        """
+        for settlement in self.pending_settlements[:]:
+            if settlement['settlement_date'] <= current_date:
+                self.settled_cash += settlement['amount']
+                self.unsettled_cash -= settlement['amount']
+                self.pending_settlements.remove(settlement)
+    
+    def calculate_position_size(self, signal):
+        """
+        Use Kelly criterion for position sizing
+        """
+        # Simplified - you'll implement full Kelly later
+        return 1  # Start with 1 contract
+
+
+class ExecutionHandler:
+    """
+    Simulates realistic order execution with slippage
+    """
+    def __init__(self, events_queue, data_handler, commission=0.65):
+        self.events = events_queue
+        self.data = data_handler
+        self.commission = commission
+    
+    def execute_order(self, order_event):
+        """
+        Simulate order execution with realistic fills
+        """
+        if order_event.order_type == 'MARKET':
+            fill = self.execute_market_order(order_event)
+            self.events.put(fill)
+    
+    def execute_market_order(self, order):
+        """
+        Model realistic execution costs
+        """
+        # Get current market data
+        current_data = self.data.get_latest_bars(order.symbol, N=1)
+        
+        if len(current_data) == 0:
+            print(f"No data available for {order.symbol}")
+            return None
+        
+        # Calculate time to expiration
+        current_timestamp = self.data.current_timestamp
+        expiration = pd.Timestamp(current_data.iloc[0]['expiration_timestamp'], unit='us')
+        hours_to_expiry = (expiration - current_timestamp).total_seconds() / 3600
+        
+        # Calculate fill price with slippage
+        fill_price, slippage = self.model_slippage(
+            current_data.iloc[0],
+            order.direction,
+            hours_to_expiry
+        )
+        
+        return FillEvent(
+            type=EventType.FILL,
+            symbol=order.symbol,
+            quantity=order.quantity,
+            direction=order.direction,
+            fill_price=fill_price,
+            commission=self.commission,
+            timestamp=current_timestamp,
+            slippage=slippage
+        )
+    
+    def model_slippage(self, market_data, side, time_to_expiry_hours):
+        """
+        Realistic slippage model for 0-7 DTE
+        """
+        mid_price = market_data['mid_price']
+        spread = market_data['ask_price'] - market_data['bid_price']
+        
+        # Base fill at bid/ask
+        if side == 'BUY':
+            base_fill = market_data['ask_price']
+        else:
+            base_fill = market_data['bid_price']
+        
+        # Additional slippage based on time to expiration
+        additional_slippage = 0
+        
+        # Exponential slippage in final hour for 0DTE
+        if time_to_expiry_hours < 1:
+            time_factor = np.exp((1 - time_to_expiry_hours))
+            additional_slippage += spread * 0.5 * time_factor
+        
+        # Volatility-based slippage
+        if market_data['implied_vol'] > 0.30:  # High IV
+            additional_slippage += 0.01 * mid_price
+        
+        fill_price = base_fill + (additional_slippage if side == 'BUY' else -additional_slippage)
+        
+        return fill_price, additional_slippage
+
+
+class Backtest:
+    """
+    Main backtesting engine with event-driven architecture
+    """
+    def __init__(self, symbols, start_date, end_date, initial_capital, 
+                 strategy_class, db_connection):
+        self.symbols = symbols
+        self.start_date = start_date
+        self.end_date = end_date
+        self.initial_capital = initial_capital
+        self.events = Queue()
+        
+        # Initialize components
+        self.data = DataHandler(db_connection, start_date, end_date, symbols)
+        self.strategy = strategy_class(self.events, self.data)
+        self.portfolio = Portfolio(self.events, initial_capital)
+        self.execution = ExecutionHandler(self.events, self.data)
+        
+        self.results = []
+    
+    def run(self):
+        """
+        Main event loop - PROPER SEQUENCING CRITICAL
+        """
+        while self.data.continue_backtest:
+            # 1. Update market data (generates MarketEvent)
+            market_event = self.data.update_bars()
+            
+            if market_event is None:
+                break
+            
+            self.events.put(market_event)
+            
+            # 2. Process settlements (T+1)
+            self.portfolio.process_settlements(self.data.current_timestamp)
+            
+            # 3. Process all events in FIFO order
+            while True:
+                try:
+                    event = self.events.get(False)
+                except:
+                    break
+                
+                if event.type == EventType.MARKET:
+                    # Strategy generates signals
+                    self.strategy.calculate_signals(event)
+                
+                elif event.type == EventType.SIGNAL:
+                    # Portfolio converts to orders
+                    self.portfolio.update_signal(event)
+                
+                elif event.type == EventType.ORDER:
+                    # Execution simulates fills
+                    self.execution.execute_order(event)
+                
+                elif event.type == EventType.FILL:
+                    # Portfolio updates positions
+                    self.portfolio.update_fill(event)
+            
+            # Record current state
+            self.record_holdings()
+        
+        return self.generate_results()
+    
+    def record_holdings(self):
+        """
+        Track portfolio value over time
+        """
+        total_value = self.portfolio.settled_cash + self.portfolio.unsettled_cash
+        
+        # Add market value of positions
+        for symbol, position in self.portfolio.positions.items():
+            current_data = self.data.get_latest_bars(symbol, N=1)
+            if len(current_data) > 0:
+                total_value += position['quantity'] * current_data.iloc[0]['mid_price'] * 100
+        
+        self.results.append({
+            'timestamp': self.data.current_timestamp,
+            'total_value': total_value,
+            'cash': self.portfolio.settled_cash,
+            'positions': len([p for p in self.portfolio.positions.values() if p['quantity'] != 0])
+        })
+    
+    def generate_results(self):
+        """
+        Calculate performance metrics
+        """
+        df = pd.DataFrame(self.results)
+        df['returns'] = df['total_value'].pct_change()
+        
+        results = {
+            'total_return': (df['total_value'].iloc[-1] / self.initial_capital - 1) * 100,
+            'sharpe_ratio': df['returns'].mean() / df['returns'].std() * np.sqrt(252),
+            'max_drawdown': self.calculate_max_drawdown(df['total_value']),
+            'total_trades': len(self.portfolio.all_holdings),
+            'equity_curve': df
+        }
+        
+        return results
+    
+    def calculate_max_drawdown(self, equity_curve):
+        """
+        Calculate maximum peak-to-trough drawdown
+        """
+        cummax = equity_curve.cummax()
+        drawdown = (equity_curve - cummax) / cummax
+        return drawdown.min() * 100
+
+PHASE 4: GREEKS RECALCULATION ENGINE
+Objective: Dynamically update Greeks at proper frequencies
+pythonfrom py_vollib.black_scholes import black_scholes as bs
+from py_vollib.black_scholes.greeks.analytical import delta, gamma, theta, vega
+import numpy as np
+
+class GreeksCalculator:
+    """
+    Calculate and update Greeks with proper frequency for 0DTE
+    """
+    def __init__(self):
+        self.last_update_time = {}
+        self.last_price = {}
+        self.last_iv = {}
+    
+    def should_update_greeks(self, symbol, current_price, current_iv, 
+                            time_to_expiry_hours, current_time):
+        """
+        Determine if Greeks need recalculation
+        
+        For 0DTE: recalculate every 1-5 seconds (in final hour)
+        For backtesting: recalculate when conditions change
+        """
+        if symbol not in self.last_update_time:
+            return True
+        
+        time_elapsed = (current_time - self.last_update_time[symbol]).seconds / 60
+        price_change_pct = abs(current_price - self.last_price.get(symbol, current_price)) / current_price
+        iv_change_pct = abs(current_iv - self.last_iv.get(symbol, current_iv)) / current_iv
+        
+        # Update triggers
+        if price_change_pct > 0.001:  # 0.1% price change
+            return True
+        if time_elapsed > 5:  # 5 minutes
+            return True
+        if iv_change_pct > 0.01:  # 1% IV change
+            return True
+        if time_to_expiry_hours < 1:  # Less than 1 hour
+            return True
+        
+        return False
+    
+    def calculate_greeks(self, option_type, S, K, t, r, sigma):
+        """
+        Calculate all Greeks using Black-Scholes
+        
+        CRITICAL: Must use implied volatility (sigma), not historical
+        """
+        flag = 'c' if option_type == 'C' else 'p'
+        
+        # Handle edge cases
+        if t <= 0:
+            # At expiration
+            if option_type == 'C':
+                value = max(0, S - K)
+                delta_val = 1.0 if S > K else 0.0
+            else:
+                value = max(0, K - S)
+                delta_val = -1.0 if S < K else 0.0
+            
+            return {
+                'price': value,
+                'delta': delta_val,
+                'gamma': 0,
+                'theta': 0,
+                'vega': 0
+            }
+        
+        # Calculate Greeks
+        try:
+            greeks = {
+                'price': bs(flag, S, K, t, r, sigma),
+                'delta': delta(flag, S, K, t, r, sigma),
+                'gamma': gamma(flag, S, K, t, r, sigma),
+                'theta': theta(flag, S, K, t, r, sigma),
+                'vega': vega(flag, S, K, t, r, sigma)
+            }
+            
+            # Validate Greeks
+            if option_type == 'C':
+                assert 0 <= greeks['delta'] <= 1, f"Invalid call delta: {greeks['delta']}"
+            else:
+                assert -1 <= greeks['delta'] <= 0, f"Invalid put delta: {greeks['delta']}"
+            
+            assert greeks['gamma'] >= 0, f"Gamma must be positive: {greeks['gamma']}"
+            
+            return greeks
+            
+        except Exception as e:
+            print(f"Greeks calculation error: {e}")
+            return None
+    
+    def vectorized_greeks(self, df):
+        """
+        Fast vectorized Greeks calculation for entire chain
+        """
+        from py_vollib_vectorized import vectorized_implied_volatility
+        
+        # Prepare arrays
+        flags = ['c' if ot == 'C' else 'p' for ot in df['option_type']]
+        S = df['underlying_price'].values
+        K = df['strike'].values
+        t = df['time_to_expiry_years'].values
+        r = np.full(len(df), 0.043)  # Current SOFR
+        sigma = df['implied_vol'].values
+        
+        # Vectorized calculation (much faster)
+        df['delta_calc'] = vectorized_delta(flags, S, K, t, r, sigma)
+        df['gamma_calc'] = vectorized_gamma(flags, S, K, t, r, sigma)
+        df['theta_calc'] = vectorized_theta(flags, S, K, t, r, sigma)
+        df['vega_calc'] = vectorized_vega(flags, S, K, t, r, sigma)
+        
+        return df
+
+PHASE 5: WALK-FORWARD OPTIMIZATION FRAMEWORK
+Objective: Prevent overfitting through proper temporal validation
+pythonfrom sklearn.model_selection import TimeSeriesSplit
+
+class WalkForwardOptimizer:
+    """
+    Walk-forward analysis prevents curve-fitting
+    """
+    def __init__(self, backtest_engine, param_grid, n_splits=10):
+        self.engine = backtest_engine
+        self.param_grid = param_grid
+        self.n_splits = n_splits
+        self.results = []
+    
+    def optimize(self, data, test_size_pct=0.2):
+        """
+        Rolling window optimization
+        
+        Train on 12 months → Test on 1 month → Roll forward
+        """
+        tscv = TimeSeriesSplit(n_splits=self.n_splits, 
+                               test_size=int(len(data) * test_size_pct))
+        
+        for train_idx, test_idx in tscv.split(data):
+            train_data = data.iloc[train_idx]
+            test_data = data.iloc[test_idx]
+            
+            # Optimize parameters on training data
+            best_params = self.grid_search(train_data)
+            
+            # Test on out-of-sample data
+            oos_results = self.engine.run(test_data, best_params)
+            is_results = self.engine.run(train_data, best_params)
+            
+            self.results.append({
+                'train_period': (train_data.index[0], train_data.index[-1]),
+                'test_period': (test_data.index[0], test_data.index[-1]),
+                'best_params': best_params,
+                'is_sharpe': is_results['sharpe_ratio'],
+                'oos_sharpe': oos_results['sharpe_ratio'],
+                'is_return': is_results['total_return'],
+                'oos_return': oos_results['total_return']
+            })
+        
+        # Calculate Walk-Forward Efficiency
+        wfe = self.calculate_wfe()
+        
+        return self.results, wfe
+    
+    def grid_search(self, train_data):
+        """
+        Test all parameter combinations on training data
+        """
+        best_sharpe = -999
+        best_params = None
+        
+        for params in self.generate_param_combinations():
+            results = self.engine.run(train_data, params)
+            
+            if results['sharpe_ratio'] > best_sharpe:
+                best_sharpe = results['sharpe_ratio']
+                best_params = params
+        
+        return best_params
+    
+    def calculate_wfe(self):
+        """
+        Walk-Forward Efficiency = avg(OOS returns) / avg(IS returns)
+        
+        > 0.7 = excellent
+        0.4-0.7 = acceptable
+        < 0.4 = severe overfitting
+        """
+        avg_oos = np.mean([r['oos_return'] for r in self.results])
+        avg_is = np.mean([r['is_return'] for r in self.results])
+        
+        wfe = avg_oos / avg_is if avg_is != 0 else 0
+        
+        print(f"\nWalk-Forward Efficiency: {wfe:.3f}")
+        if wfe > 0.7:
+            print("✓ Excellent robustness")
+        elif wfe > 0.4:
+            print("⚠ Acceptable with some overfitting")
+        else:
+            print("✗ SEVERE OVERFITTING - reject strategy")
+        
+        return wfe
+
+PHASE 6: STATISTICAL VALIDATION SUITE
+Objective: Distinguish real edge from random luck
+pythonfrom scipy.stats import norm
+import numpy as np
+
+class StatisticalValidator:
+    """
+    Rigorous statistical tests for strategy validation
+    """
+    def monte_carlo_permutation_test(self, returns, n_simulations=1000):
+        """
+        Test if returns are statistically significant vs random
+        
+        p-value < 0.05 required to confirm edge
+        """
+        # Calculate original Sharpe ratio
+        original_sharpe = returns.mean() / returns.std() * np.sqrt(252)
+        
+        # Randomly permute returns
+        permuted_sharpes = []
+        for _ in range(n_simulations):
+            permuted = returns.sample(frac=1.0).reset_index(drop=True)
+            permuted_sharpe = permuted.mean() / permuted.std() * np.sqrt(252)
+            permuted_sharpes.append(permuted_sharpe)
+        
+        # Calculate p-value
+        percentile_rank = np.sum(np.array(permuted_sharpes) >= original_sharpe) / n_simulations
+        p_value = 1 - percentile_rank
+        
+        result = {
+            'original_sharpe': original_sharpe,
+            'p_value': p_value,
+            'significant': p_value < 0.05,
+            'permuted_distribution': permuted_sharpes
+        }
+        
+        if p_value < 0.05:
+            print(f"✓ Statistically significant edge (p={p_value:.4f})")
+        else:
+            print(f"✗ No significant edge detected (p={p_value:.4f})")
+        
+        return result
+    
+    def deflated_sharpe_ratio(self, observed_sr, n_trials, skewness, 
+                             kurtosis, n_observations):
+        """
+        Adjust Sharpe ratio for multiple testing bias
+        
+        After 100 trials, expected max SR = 2.5 even with zero true edge
+        """
+        # Variance of Sharpe ratio
+        var_sr = ((1 + (1 - skewness * observed_sr + 
+                       (kurtosis - 1) / 4 * observed_sr**2)) / 
+                 (n_observations - 1))
+        
+        # Expected maximum SR under null hypothesis
+        expected_max_sr = norm.ppf(1 - 1/n_trials) * np.sqrt(var_sr)
+        
+        # Deflated SR
+        deflated_sr = (observed_sr - expected_max_sr) / np.sqrt(var_sr)
+        
+        # P-value
+        p_value = norm.cdf(deflated_sr)
+        
+        result = {
+            'observed_sr': observed_sr,
+            'deflated_sr': deflated_sr,
+            'p_value': p_value,
+            'significant': p_value > 0.95,
+            'expected_max_sr': expected_max_sr
+        }
+        
+        print(f"Observed SR: {observed_sr:.2f}")
+        print(f"Deflated SR: {deflated_sr:.2f}")
+        print(f"After {n_trials} trials, expected max random SR: {expected_max_sr:.2f}")
+        
+        if p_value > 0.95:
+            print("✓ Significant edge after adjusting for multiple testing")
+        else:
+            print("✗ Not significant after multiple testing adjustment")
+        
+        return result
+    
+    def monte_carlo_drawdown_simulation(self, trade_returns, n_simulations=1000):
+        """
+        Estimate realistic worst-case drawdown
+        
+        95th percentile should guide capital requirements
+        """
+        max_drawdowns = []
+        
+        for _ in range(n_simulations):
+            # Resample with replacement
+            sampled_returns = np.random.choice(trade_returns, size=len(trade_returns), replace=True)
+            
+            # Calculate equity curve
+            equity = (1 + sampled_returns).cumprod()
+            
+            # Calculate drawdown
+            cummax = np.maximum.accumulate(equity)
+            drawdown = (equity - cummax) / cummax
+            max_drawdowns.append(drawdown.min())
+        
+        percentiles = {
+            '50th': np.percentile(max_drawdowns, 50),
+            '75th': np.percentile(max_drawdowns, 75),
+            '95th': np.percentile(max_drawdowns, 95),
+            '99th': np.percentile(max_drawdowns, 99)
+        }
+        
+        print("\nMonte Carlo Drawdown Analysis:")
+        print(f"  50th percentile: {percentiles['50th']:.2%}")
+        print(f"  95th percentile: {percentiles['95th']:.2%}")
+        print(f"  99th percentile: {percentiles['99th']:.2%}")
+        
+        # Capital requirements
+        account_size_needed = 100000  # Example
+        recommended_capital = account_size_needed / (1 + percentiles['95th'])
+        
+        print(f"\nRecommended capital for $100k strategy: ${recommended_capital:,.0f}")
+        print(f"  (3x safety margin for 95th percentile drawdown)")
+        
+        return percentiles, max_drawdowns
+
+PHASE 7: PATTERN DISCOVERY ENGINE
+(Building on validation framework above)
+pythonclass PatternDiscovery:
+    """
+    Systematic pattern mining with statistical validation
+    """
+    def __init__(self, data):
+        self.data = data
+        self.patterns = []
+    
+    def mine_iv_patterns(self):
+        """
+        Find high-probability IV Rank/Percentile setups
+        """
+        # Calculate IV Rank
+        self.data['iv_52w_low'] = self.data.groupby('symbol')['implied_vol'].transform(
+            lambda x: x.rolling(252, min_periods=1).min()
+        )
+        self.data['iv_52w_high'] = self.data.groupby('symbol')['implied_vol'].transform(
+            lambda x: x.rolling(252, min_periods=1).max()
+        )
+        
+        self.data['iv_rank'] = (
+            (self.data['implied_vol'] - self.data['iv_52w_low']) / 
+            (self.data['iv_52w_high'] - self.data['iv_52w_low']) * 100
+        )
+        
+        # Calculate IV Percentile (more robust)
+        self.data['iv_percentile'] = self.data.groupby('symbol')['implied_vol'].transform(
+            lambda x: x.rolling(252).apply(
+                lambda vals: (vals < vals.iloc[-1]).sum() / len(vals) * 100
+            )
+        )
+        
+        # Test pattern: High IV → Premium sell → Mean reversion
+        high_iv_trades = self.data[
+            (self.data['iv_rank'] > 75) &
+            (self.data['iv_percentile'] > 67)
+        ]
+        
+        # Calculate subsequent returns
+        # ... pattern validation code ...
+        
+        return high_iv_trades
+    
+    def mine_greeks_patterns(self):
+        """
+        Find profitable delta/gamma/theta combinations
+        """
+        # Test 0.30 delta premium selling
+        delta_30_puts = self.data[
+            (self.data['option_type'] == 'P') &
+            (self.data['delta'].abs() >= 0.28) &
+            (self.data['delta'].abs() <= 0.32)
+        ]
+        
+        # Calculate historical win rate
+        # ... backtest these specific strikes ...
+        
+        return delta_30_puts
+    
+    def cluster_regimes(self, n_clusters=5):
+        """
+        Identify distinct market regimes using k-means
+        """
+        from sklearn.cluster import KMeans
+        
+        features = self.data[['daily_return', 'realized_vol', 'vix', 'iv_rank']].dropna()
+        
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        self.data['regime'] = kmeans.fit_predict(features)
+        
+        # Analyze regime characteristics
+        regime_stats = self.data.groupby('regime').agg({
+            'daily_return': ['mean', 'std'],
+            'realized_vol': 'mean',
+            'vix': 'mean'
+        })
+        
+        print("\nIdentified Market Regimes:")
+        print(regime_stats)
+        
+        return regime_stats
+```
+
+---
+
+## **IMPLEMENTATION INSTRUCTIONS FOR CLAUDE CODE**
+
+### **Start with this exact sequence:**
+
+**STEP 1**: Create project structure
+```
+options_backtester/
+├── data/
+│   ├── raw/              # Your historical CSV files
+│   ├── processed/        # Cleaned Parquet files
+│   └── sqlite/           # Local database
+├── src/
+│   ├── database.py       # Database schema & connection
+│   ├── data_loader.py    # Point-in-time data loading
+│   ├── events.py         # Event classes (Market, Signal, Order, Fill)
+│   ├── data_handler.py   # DataHandler class
+│   ├── strategy.py       # Base Strategy class
+│   ├── portfolio.py      # Portfolio management
+│   ├── execution.py      # Execution with slippage
+│   ├── backtest.py       # Main Backtest engine
+│   ├── greeks.py         # Greeks calculator
+│   ├── validation.py     # Statistical validation
+│   └── patterns.py       # Pattern discovery
+├── tests/
+│   └── test_pit.py       # Test point-in-time queries
+├── notebooks/
+│   └── analysis.ipynb    # Results analysis
+└── requirements.txt
+```
+
+**STEP 2**: Install requirements
+```
+pip install pandas numpy scipy scikit-learn py_vollib sqlalchemy psycopg2-binary pyarrow fastparquet matplotlib seaborn
+STEP 3: Create database schema (database.py)
+python# Paste the SQL schemas from PHASE 1 above
+# Create connection helper functions
+STEP 4: Build data loader (data_loader.py)
+python# Paste PointInTimeDataLoader class from PHASE 2
+# Add validation methods
+STEP 5: Create event system (events.py)
+python# Paste Event classes from PHASE 3
+STEP 6: Build backtesting engine (backtest.py)
+python# Paste complete Backtest class from PHASE 3
+# Include DataHandler, Portfolio, ExecutionHandler
+STEP 7: Add Greeks calculator (greeks.py)
+python# Paste GreeksCalculator from PHASE 4
+STEP 8: Implement walk-forward (validation.py)
+python# Paste WalkForwardOptimizer from PHASE 5
+# Add statistical tests from PHASE 6
+STEP 9: Add pattern discovery (patterns.py)
+python# Paste PatternDiscovery from PHASE 7
+STEP 10: Create example strategy
+pythonclass SimplePremiumSelling(Strategy):
+    """
+    Example: Sell 0.30 delta puts when IV Rank > 75%
+    """
+    def calculate_signals(self, market_event):
+        for symbol, data in market_event.data.items():
+            # Get puts around 0.30 delta
+            puts = data[
+                (data['option_type'] == 'P') &
+                (data['delta'].abs() >= 0.28) &
+                (data['delta'].abs() <= 0.32)
+            ]
+            
+            if len(puts) == 0:
+                continue
+            
+            # Check IV Rank
+            iv_rank = self.calculate_iv_rank(data)
+            
+            if iv_rank > 75:
+                # Generate SELL signal
+                signal = SignalEvent(
+                    symbol=symbol,
+                    signal_type='SHORT',
+                    strength=1.0,
+                    strikes=[puts.iloc[0]['strike']]
+                )
+                self.events.put(signal)
+
+CRITICAL REMINDERS
+DON'T DO THIS:
+❌ Use AWS Athena/S3/Glue
+❌ Assume mid-price fills
+❌ Use historical volatility for Greeks
+❌ Forward-fill missing data
+❌ Test on same out-of-sample data multiple times
+❌ Ignore survivorship bias
+❌ Skip walk-forward validation
+DO THIS:
+✓ Use local PostgreSQL or SQLite
+✓ Store Parquet files locally for speed
+✓ Model bid-ask spreads and slippage
+✓ Use implied volatility from actual quotes
+✓ Validate Greeks (delta ranges, gamma positive)
+✓ Include delisted securities
+✓ Implement proper event sequencing
+✓ Calculate point-in-time IV Rank/Percentile
+✓ Test with Monte Carlo permutation
+✓ Use walk-forward optimization
+✓ Calculate Deflated Sharpe Ratio
+✓ Model T+1 settlement properly
+✓ Close 0DTE by 3:30 PM (avoid assignment risk)
+
+SUCCESS CRITERIA BEFORE LIVE TRADING
+Before deploying ANY strategy:
+
+Walk-Forward Efficiency > 0.5 (preferably > 0.7)
+Monte Carlo p-value < 0.05 (statistically significant)
+Deflated Sharpe Ratio > 0.95 at 95% confidence
+Minimum 100 trades (500+ ideal) in backtest
+Tested across 2008, 2020, 2022 crisis periods
+Profitable at 2× transaction costs
+Positive in 4 of 5 market regimes
+Paper trading 30-60 days matches backtest within 30%

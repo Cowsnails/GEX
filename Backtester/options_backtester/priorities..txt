@@ -1,0 +1,41 @@
+🎯 What's Next - Your Requirements (Prioritized)
+Based on your detailed explanation, here's what needs to be built:
+
+TIER 1: CRITICAL (Nothing works without these)
+⚠️ Historical Data Importer - MOST URGENT
+
+ThetaData minute-level data fetcher
+Status tracker for 192 tickers (3 years each)
+"All historical data received" indicator
+One-button update system
+Missing date range calculator
+Admin-only controls
+🔒 Admin-Only Access Controls
+
+Lock backtester to admins only
+Regular users can VIEW, not interact
+Prevent non-admins from running backtests
+TIER 2: CORE FUNCTIONALITY
+🚨 "Backtester In Use" Warning System
+
+Banner on all sections when backtest running
+"Expect 10-30 minutes" message
+Live data continues, charts don't switch
+🎴 Immersive Results Cards & Modals
+
+Each backtest = interactive card
+Click to open detailed modal
+Show all metrics, charts, arrows to key levels
+📊 Comparison Tool
+
+Compare multiple backtests side-by-side
+Highlight similarities/differences
+Strategic insights
+TIER 3: ADVANCED FEATURES
+📈 Alpha/Beta calculation against SPY
+⏰ Auto-close 5 minutes before 4pm ET
+💨 Dynamic slippage based on spread
+📊 Multi-timeframe bars (1m→3m,5m,15m,30m,1h,2h,4h)
+🔄 Auto-resume on crash
+📉 Progress tracking with time estimates
+🚀 Deploy strategy button (placeholder for future)

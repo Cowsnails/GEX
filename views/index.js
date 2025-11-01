@@ -1562,9 +1562,10 @@ export function getHTML() {
           if (data.latency) document.getElementById('latency').textContent = data.latency + 'ms';
           updateRegimeDisplay();
           render();
-        } 
+        }
         else if (data.type === 'stock') {
-          window.appState.stockData = data.response;
+          // 🔥 FIX: Preserve fallback { price: 0 } if no data received (markets closed)
+          window.appState.stockData = data.response || { price: 0 };
           document.getElementById('symbolDisplay').textContent = document.getElementById('symbolInput').value;
           document.getElementById('priceDisplay').textContent = window.appState.stockData && window.appState.stockData.price ? '$' + window.appState.stockData.price.toFixed(2) : '$--';
           updateRegimeDisplay();

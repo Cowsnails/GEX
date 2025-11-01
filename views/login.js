@@ -238,10 +238,15 @@ export function getLoginHTML() {
       </div>
       
       <div class="form-group">
-        <label class="form-label">Email (Optional)</label>
-        <input type="email" id="registerEmail" class="form-input" placeholder="your@email.com" autocomplete="email">
+        <label class="form-label">Email (Required - Gmail Only)</label>
+        <input type="email" id="registerEmail" class="form-input" placeholder="your@gmail.com" autocomplete="email" required>
       </div>
-      
+
+      <div class="form-group">
+        <label class="form-label">Activation Key (Required)</label>
+        <input type="text" id="activationKey" class="form-input" placeholder="Enter your activation key" autocomplete="off" required>
+      </div>
+
       <div class="form-group">
         <label class="form-label">Password</label>
         <input type="password" id="registerPassword" class="form-input" placeholder="Create password (min 12 chars)" autocomplete="new-password">
@@ -345,23 +350,34 @@ export function getLoginHTML() {
       const username = document.getElementById('registerUsername').value.trim();
       const email = document.getElementById('registerEmail').value.trim();
       const password = document.getElementById('registerPassword').value;
-      
+      const activationKey = document.getElementById('activationKey').value.trim();
+
       if (!username || !password) {
         showError('registerError', 'Username and password are required');
         return;
       }
-      
+
+      if (!email) {
+        showError('registerError', 'Gmail address is required');
+        return;
+      }
+
+      if (!activationKey) {
+        showError('registerError', 'Activation key is required');
+        return;
+      }
+
       if (password.length < 12) {
         showError('registerError', 'Password must be at least 12 characters');
         return;
       }
-      
+
       try {
         const response = await fetch('/api/auth/register', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, email, password })
+          body: JSON.stringify({ username, email, password, activationKey })
         });
         
         const data = await response.json();

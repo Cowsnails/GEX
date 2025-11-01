@@ -1015,9 +1015,11 @@ const server = serve({
       }
       
       const result = UserManager.registerUser(
-        validation.data.username, 
-        validation.data.password, 
-        validation.data.email
+        validation.data.username,
+        validation.data.password,
+        validation.data.email,
+        false, // isAdmin
+        validation.data.activationKey // activation key
       );
       
       if (result.success) {
@@ -5874,21 +5876,21 @@ if (url.pathname === "/api/theta/cached-expirations") {
     // 🎯 ADMIN: Check universe status
     if (url.pathname === "/api/admin/universe-status") {
       const session = UserManager.verifySession(token);
-      
+
       if (!session.valid || !session.isAdmin) {
-        return createSecureResponse(JSON.stringify({ 
-          success: false, 
-          error: "Admin access required" 
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Admin access required"
         }), {
           status: 403,
           headers: { "Content-Type": "application/json" }
         });
       }
-      
+
       const universe = universeManager.getUniverse();
       const lastUpdated = universeManager.lastUpdated;
-      
-      return createSecureResponse(JSON.stringify({ 
+
+      return createSecureResponse(JSON.stringify({
         success: true,
         tickerCount: Object.keys(universe).length,
         lastUpdated: lastUpdated ? lastUpdated.toISOString() : null,
@@ -5898,7 +5900,95 @@ if (url.pathname === "/api/theta/cached-expirations") {
         headers: { "Content-Type": "application/json" }
       });
     }
-    
+
+    // 🔑 ADMIN: Generate activation keys
+    if (url.pathname === "/api/admin/generate-keys") {
+      if (req.method !== "POST") {
+        return createSecureResponse("Method not allowed", { status: 405 });
+      }
+
+      const session = UserManager.verifySession(token);
+
+      if (!session.valid || !session.isAdmin) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Admin access required"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // CSRF protection
+      const csrfCheck = requireCSRF(req, token);
+      if (!csrfCheck.valid) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "CSRF validation failed"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // Parse request body
+      const bodyResult = await parseAndValidateBody(req);
+      if (!bodyResult.valid) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: bodyResult.error
+        }), {
+          status: bodyResult.status,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const count = parseInt(bodyResult.body.count) || 1;
+
+      if (count < 1 || count > 100) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Count must be between 1 and 100"
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const result = UserManager.generateActivationKeys(count);
+
+      console.log(`✅ Admin ${session.username} generated ${count} activation keys`);
+
+      return createSecureResponse(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // 🔑 ADMIN: Get all activation keys
+    if (url.pathname === "/api/admin/activation-keys") {
+      if (req.method !== "GET") {
+        return createSecureResponse("Method not allowed", { status: 405 });
+      }
+
+      const session = UserManager.verifySession(token);
+
+      if (!session.valid || !session.isAdmin) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Admin access required"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const result = UserManager.getAllActivationKeys();
+
+      return createSecureResponse(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     // 🎯 ADMIN: Dashboard page (with IP whitelist protection) - 🔒 Use createSecureHTMLResponse
 if (url.pathname === "/admin") {
   // ✅ STEP 1: Verify user is logged in

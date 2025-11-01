@@ -67,15 +67,15 @@ export async function parseAndValidateBody(req, maxSize = MAX_BODY_SIZE.default)
 }
 
 /**
- * Validate registration request - 📧 UPDATED: Gmail REQUIRED
+ * Validate registration request - 📧 UPDATED: Gmail REQUIRED + 🔑 Activation Key REQUIRED
  */
 export function validateRegistrationRequest(body) {
   const errors = [];
-  
+
   // Username validation
   const usernameCheck = validateUsername(body.username);
   if (!usernameCheck.valid) errors.push(usernameCheck.error);
-  
+
   // 📧 NEW: Email validation - REQUIRED and must be Gmail
   if (!body.email) {
     errors.push('Gmail address is required for registration');
@@ -85,26 +85,34 @@ export function validateRegistrationRequest(body) {
       errors.push(gmailCheck.error);
     }
   }
-  
+
   // Password validation
   if (!body.password || typeof body.password !== 'string') {
     errors.push('Password is required');
   } else if (body.password.length < 12) {
     errors.push('Password must be at least 12 characters');
   }
-  
+
+  // 🔑 NEW: Activation key validation - REQUIRED
+  if (!body.activationKey || typeof body.activationKey !== 'string') {
+    errors.push('Activation key is required');
+  } else if (body.activationKey.trim().length === 0) {
+    errors.push('Activation key cannot be empty');
+  }
+
   if (errors.length > 0) {
     return { valid: false, errors };
   }
-  
+
   const gmailCheck = isValidGmail(body.email);
-  
+
   return {
     valid: true,
     data: {
       username: usernameCheck.value,
       email: gmailCheck.email, // Always lowercase Gmail
-      password: body.password
+      password: body.password,
+      activationKey: sanitizeString(body.activationKey.trim().toUpperCase(), 50) // 🔑 Activation key
     }
   };
 }

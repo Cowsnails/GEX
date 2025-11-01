@@ -60,6 +60,18 @@ db.run(`
 `);
 
 db.run(`
+  CREATE TABLE IF NOT EXISTS activation_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_code TEXT UNIQUE NOT NULL,
+    is_used BOOLEAN DEFAULT 0,
+    used_by_user_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    used_at DATETIME,
+    FOREIGN KEY (used_by_user_id) REFERENCES users(id)
+  )
+`);
+
+db.run(`
   CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -187,6 +199,21 @@ try {
     console.log('✅ Order ID columns added to positions table');
   } catch (alterError) {
     console.error('Order ID migration warning:', alterError.message);
+  }
+}
+
+// 🔑 MIGRATION: Add activation_key column to users table
+try {
+  const testQuery = db.prepare('SELECT activation_key FROM users LIMIT 1');
+  testQuery.get();
+  console.log('✅ users table has activation_key column');
+} catch (error) {
+  console.log('🔄 Adding activation_key column to users table...');
+  try {
+    db.run('ALTER TABLE users ADD COLUMN activation_key TEXT');
+    console.log('✅ Activation key column added to users table');
+  } catch (alterError) {
+    console.error('Activation key migration warning:', alterError.message);
   }
 }
 
@@ -367,43 +394,145 @@ export class UserManager {
       return null;
     }
   }
-  
-  // Register new user
-  static registerUser(username, password, email = null, isAdmin = false) {
+
+  // 🔑 NEW: Generate activation key
+  static generateActivationKey() {
     try {
+      // Generate a random 16-character key
+      const keyCode = randomBytes(8).toString('hex').toUpperCase();
+
+      const stmt = db.prepare('INSERT INTO activation_keys (key_code) VALUES (?)');
+      const result = stmt.run(keyCode);
+
+      console.log(`✅ Generated activation key: ${keyCode}`);
+      return { success: true, keyCode, keyId: result.lastInsertRowid };
+    } catch (error) {
+      console.error('❌ Error generating activation key:', error.message);
+      return { success: false, error: 'Failed to generate activation key' };
+    }
+  }
+
+  // 🔑 NEW: Generate multiple activation keys
+  static generateActivationKeys(count = 1) {
+    try {
+      const keys = [];
+      for (let i = 0; i < count; i++) {
+        const result = this.generateActivationKey();
+        if (result.success) {
+          keys.push(result.keyCode);
+        }
+      }
+      console.log(`✅ Generated ${keys.length} activation keys`);
+      return { success: true, keys };
+    } catch (error) {
+      console.error('❌ Error generating activation keys:', error.message);
+      return { success: false, error: 'Failed to generate activation keys' };
+    }
+  }
+
+  // 🔑 NEW: Validate activation key
+  static validateActivationKey(keyCode) {
+    try {
+      const stmt = db.prepare('SELECT * FROM activation_keys WHERE key_code = ?');
+      const key = stmt.get(keyCode);
+
+      if (!key) {
+        return { valid: false, error: 'Invalid activation key' };
+      }
+
+      if (key.is_used) {
+        return { valid: false, error: 'Activation key has already been used' };
+      }
+
+      return { valid: true, keyId: key.id };
+    } catch (error) {
+      console.error('❌ Error validating activation key:', error.message);
+      return { valid: false, error: 'Failed to validate activation key' };
+    }
+  }
+
+  // 🔑 NEW: Mark activation key as used
+  static markActivationKeyUsed(keyCode, userId) {
+    try {
+      const stmt = db.prepare('UPDATE activation_keys SET is_used = 1, used_by_user_id = ?, used_at = CURRENT_TIMESTAMP WHERE key_code = ?');
+      stmt.run(userId, keyCode);
+      console.log(`✅ Activation key ${keyCode} marked as used by user ${userId}`);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Error marking activation key as used:', error.message);
+      return { success: false, error: 'Failed to mark activation key as used' };
+    }
+  }
+
+  // 🔑 NEW: Get all activation keys (admin)
+  static getAllActivationKeys() {
+    try {
+      const stmt = db.prepare(`
+        SELECT ak.*, u.username as used_by_username
+        FROM activation_keys ak
+        LEFT JOIN users u ON ak.used_by_user_id = u.id
+        ORDER BY ak.created_at DESC
+      `);
+      const keys = stmt.all();
+      return { success: true, keys };
+    } catch (error) {
+      console.error('❌ Error getting activation keys:', error.message);
+      return { success: false, keys: [] };
+    }
+  }
+
+  // Register new user
+  static registerUser(username, password, email = null, isAdmin = false, activationKey = null) {
+    try {
+      // 🔑 Validate activation key (required for non-admin registrations)
+      if (!isAdmin && activationKey) {
+        const keyValidation = this.validateActivationKey(activationKey);
+        if (!keyValidation.valid) {
+          return { success: false, error: keyValidation.error };
+        }
+      } else if (!isAdmin && !activationKey) {
+        return { success: false, error: 'Activation key is required to create an account' };
+      }
+
       // Validate username
       const usernameValidation = validateUsername(username);
       if (!usernameValidation.valid) {
         return { success: false, error: usernameValidation.error };
       }
-      
+
       // Validate email
       const emailValidation = validateEmail(email);
       if (!emailValidation.valid) {
         return { success: false, error: emailValidation.error };
       }
-      
+
       // Validate password strength
       const passwordValidation = validatePassword(password);
       if (!passwordValidation.valid) {
-        return { 
-          success: false, 
+        return {
+          success: false,
           error: 'Password does not meet requirements',
-          errors: passwordValidation.errors 
+          errors: passwordValidation.errors
         };
       }
-      
+
       const hash = hashPassword(password);
-      const stmt = db.prepare('INSERT INTO users (username, password_hash, email, is_admin, active_account, failed_login_attempts, email_verified) VALUES (?, ?, ?, ?, ?, 0, 0)');
+      const stmt = db.prepare('INSERT INTO users (username, password_hash, email, is_admin, active_account, failed_login_attempts, email_verified, activation_key) VALUES (?, ?, ?, ?, ?, 0, 0, ?)');
       const result = stmt.run(
         usernameValidation.value,
         hash,
         emailValidation.value,
         isAdmin ? 1 : 0,
-        'default'
+        'default',
+        activationKey || null
       );
-      
-      console.log(`✅ User registered: ${usernameValidation.value}${isAdmin ? ' (ADMIN)' : ''}`);
+
+      // 🔑 Mark activation key as used
+      if (!isAdmin && activationKey) {
+        this.markActivationKeyUsed(activationKey, result.lastInsertRowid);
+      }
+
+      console.log(`✅ User registered: ${usernameValidation.value}${isAdmin ? ' (ADMIN)' : ''}${activationKey ? ` (Key: ${activationKey})` : ''}`);
       return { success: true, userId: result.lastInsertRowid };
     } catch (error) {
       console.error('❌ Registration error:', error.message);

@@ -1407,6 +1407,12 @@ export function getHTML() {
         });
       }
 
+      // 🔥 FIX: Render initial UI BEFORE WebSocket data arrives
+      // This ensures pages show with N/A values when markets are closed
+      console.log('🎨 [RENDER] Calling initial render before WebSocket data...');
+      render(true); // Force full render with N/A fallback values
+      console.log('✅ [RENDER] Initial render complete');
+
       // ✅ WEBSOCKET INITIALIZATION - MOVED TO END OF DOMContentLoaded
       console.log('🔌 [WS] Initializing WebSocket AFTER DOM ready and event listeners attached...');
       

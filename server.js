@@ -5539,8 +5539,18 @@ if (url.pathname === "/api/theta/cached-expirations") {
       }
 
       try {
-        const body = await parseAndValidateBody(req, { ticker: 'string' });
-        const { ticker } = body;
+        const bodyResult = await parseAndValidateBody(req);
+        if (!bodyResult.valid) {
+          return createSecureResponse(JSON.stringify({
+            success: false,
+            error: bodyResult.error
+          }), {
+            status: bodyResult.status || 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        const { ticker } = bodyResult.body;
 
         if (!ticker) {
           return createSecureResponse(JSON.stringify({

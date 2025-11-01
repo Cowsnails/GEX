@@ -5989,6 +5989,94 @@ if (url.pathname === "/api/theta/cached-expirations") {
       });
     }
 
+    // 👥 ADMIN: Get all users
+    if (url.pathname === "/api/admin/users") {
+      if (req.method !== "GET") {
+        return createSecureResponse("Method not allowed", { status: 405 });
+      }
+
+      const session = UserManager.verifySession(token);
+
+      if (!session.valid || !session.isAdmin) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Admin access required"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const result = UserManager.getAllUsers();
+
+      return createSecureResponse(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // 🗑️ ADMIN: Delete user
+    if (url.pathname.startsWith("/api/admin/user/")) {
+      if (req.method !== "DELETE") {
+        return createSecureResponse("Method not allowed", { status: 405 });
+      }
+
+      const session = UserManager.verifySession(token);
+
+      if (!session.valid || !session.isAdmin) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Admin access required"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // CSRF protection
+      const csrfCheck = requireCSRF(req, token);
+      if (!csrfCheck.valid) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "CSRF validation failed"
+        }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // Extract user ID from URL
+      const userId = parseInt(url.pathname.split('/').pop());
+
+      if (isNaN(userId) || userId <= 0) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Invalid user ID"
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // Prevent admin from deleting themselves
+      if (userId === session.userId) {
+        return createSecureResponse(JSON.stringify({
+          success: false,
+          error: "Cannot delete your own account"
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const result = UserManager.deleteUser(userId);
+
+      console.log(`✅ Admin ${session.username} deleted user ID ${userId}`);
+
+      return createSecureResponse(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     // 🎯 ADMIN: Dashboard page (with IP whitelist protection) - 🔒 Use createSecureHTMLResponse
 if (url.pathname === "/admin") {
   // ✅ STEP 1: Verify user is logged in

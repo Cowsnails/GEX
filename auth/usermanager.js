@@ -481,6 +481,57 @@ export class UserManager {
     }
   }
 
+  // 👥 NEW: Get all users (admin)
+  static getAllUsers() {
+    try {
+      const stmt = db.prepare(`
+        SELECT id, username, email, is_admin, created_at, last_login
+        FROM users
+        ORDER BY created_at DESC
+      `);
+      const users = stmt.all();
+      return { success: true, users };
+    } catch (error) {
+      console.error('❌ Error getting all users:', error.message);
+      return { success: false, users: [] };
+    }
+  }
+
+  // 🗑️ NEW: Delete user (admin)
+  static deleteUser(userId) {
+    try {
+      // First check if user exists
+      const checkStmt = db.prepare('SELECT username FROM users WHERE id = ?');
+      const user = checkStmt.get(userId);
+
+      if (!user) {
+        return { success: false, error: 'User not found' };
+      }
+
+      // Delete user's sessions
+      const deleteSessionsStmt = db.prepare('DELETE FROM sessions WHERE user_id = ?');
+      deleteSessionsStmt.run(userId);
+
+      // Delete user's broker credentials
+      const deleteBrokersStmt = db.prepare('DELETE FROM user_brokers WHERE user_id = ?');
+      deleteBrokersStmt.run(userId);
+
+      // Delete user's positions
+      const deletePositionsStmt = db.prepare('DELETE FROM positions WHERE user_id = ?');
+      deletePositionsStmt.run(userId);
+
+      // Delete the user
+      const deleteUserStmt = db.prepare('DELETE FROM users WHERE id = ?');
+      deleteUserStmt.run(userId);
+
+      console.log(`✅ User deleted: ${user.username} (ID: ${userId})`);
+      return { success: true, username: user.username };
+    } catch (error) {
+      console.error('❌ Error deleting user:', error.message);
+      return { success: false, error: 'Failed to delete user' };
+    }
+  }
+
   // Register new user
   static registerUser(username, password, email = null, isAdmin = false, activationKey = null) {
     try {

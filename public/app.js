@@ -8,6 +8,12 @@ import { updateTimingWidgetOnly, initializeTimingWidget } from './views/timing-w
 import { resetChartCache } from './charts/gex-chart.js';
 import { render as renderMyTrades, updateLive as updateMyTradesLive, initMyTradesView } from './views/my-trades.js';
 import { render as renderGlobalTrades, updateLive as updateGlobalTradesLive, initGlobalTradesView } from './views/global-trades.js';
+import { analyzeTradeSignal } from './analysis/signals.js';
+import { calculateGEX } from './analysis/gex.js';
+
+// 🔥 FIX: Make analysis functions globally available
+window.analyzeTradeSignal = analyzeTradeSignal;
+window.calculateGEX = calculateGEX;
 
 // State
 window.appState = {

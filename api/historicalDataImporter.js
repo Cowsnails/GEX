@@ -92,9 +92,12 @@ export async function fetchHistoricalOptionsData(ticker, date, retries = 3) {
   console.log(`📥 Fetching ${ticker} options data for ${dateStr}...`);
 
   try {
-    // ThetaData historical endpoint for options quotes (minute bars)
-    // Format: /v2/hist/option/quote?root=SPY&exp=0&start_date=20240101&end_date=20240101
-    const url = `${THETA_TERMINAL}/v2/hist/option/quote?root=${ticker}&exp=0&start_date=${dateStr}&end_date=${dateStr}`;
+    // ThetaData bulk historical endpoint for options with greeks
+    // Format: /v2/bulk_hist/option/all_trade_greeks?root=AAPL&exp=0&start_date=20231110&end_date=20231110&ivl=900000
+    // exp=0 means all expirations, ivl=900000 is 15-minute bars
+    const url = `${THETA_TERMINAL}/v2/bulk_hist/option/all_trade_greeks?root=${ticker}&exp=0&start_date=${dateStr}&end_date=${dateStr}&ivl=900000`;
+
+    console.log(`🔗 Fetching from: ${url}`);
 
     const response = await fetch(url);
 

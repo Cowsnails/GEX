@@ -543,7 +543,7 @@ export function getHTML() {
       ws: null,
       currentView: savedView,
       optionsData: [],
-      stockData: null,
+      stockData: { price: 0 }, // 🔥 FIX: Initialize with empty object instead of null
       expirations: [],
       filterATM: false,
       filterVolume: false,

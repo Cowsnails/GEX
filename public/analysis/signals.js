@@ -1,14 +1,57 @@
 // public/analysis/signals.js - COMPLETE AI Trade Signal Analyzer with Zero Gamma Logic
 
 export function analyzeTradeSignal() {
-  if (!window.appState.optionsData.length || !window.appState.stockData) return null;
-  
+  // 🔥 FIX: Return fallback signal when market is closed (no data)
+  if (!window.appState.optionsData.length || !window.appState.stockData) {
+    return {
+      action: 'WAIT',
+      confidence: 0,
+      reasoning: ['Market Closed - No Data Available'],
+      metrics: {
+        momentum: 'N/A',
+        pcRatio: 'N/A',
+        resistanceDistance: 'N/A',
+        supportDistance: 'N/A',
+        netGEX: 0,
+        zeroGamma: 'N/A',
+        regime: 'N/A'
+      },
+      levels: {
+        resistance: 'N/A',
+        support: 'N/A',
+        zeroGamma: null
+      },
+      isNoData: true  // Flag to indicate this is placeholder data
+    };
+  }
+
   const price = window.appState.stockData.price;
   const gex = window.calculateGEX();
-  
-  if (!gex) return null;
-  
-  const momentum = window.appState.priceHistory.length >= 10 
+
+  if (!gex) {
+    return {
+      action: 'WAIT',
+      confidence: 0,
+      reasoning: ['Calculating GEX...'],
+      metrics: {
+        momentum: 'N/A',
+        pcRatio: 'N/A',
+        resistanceDistance: 'N/A',
+        supportDistance: 'N/A',
+        netGEX: 0,
+        zeroGamma: 'N/A',
+        regime: 'N/A'
+      },
+      levels: {
+        resistance: 'N/A',
+        support: 'N/A',
+        zeroGamma: null
+      },
+      isNoData: true
+    };
+  }
+
+  const momentum = window.appState.priceHistory.length >= 10
     ? ((window.appState.priceHistory[window.appState.priceHistory.length - 1] - window.appState.priceHistory[0]) / window.appState.priceHistory[0]) * 100
     : 0;
   

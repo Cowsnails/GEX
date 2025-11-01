@@ -7,8 +7,9 @@ export function renderTradeSignals() {
   
   const signal = window.analyzeTradeSignal();
   if (!signal) return html + '<div style="text-align:center;padding:40px;color:#9ca3af;">Loading signal data...</div>';
-  
+
   const currentPrice = window.appState.stockData ? window.appState.stockData.price : 0;
+  const currentPriceDisplay = currentPrice > 0 ? currentPrice.toFixed(2) : 'N/A';
   
   const signalBg = signal.action === 'BUY' ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' : signal.action === 'SELL' ? 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' : 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)';
   const signalEmoji = signal.action === 'BUY' ? '🚀' : signal.action === 'SELL' ? '📉' : '⸏';
@@ -29,7 +30,7 @@ export function renderTradeSignals() {
   // Current Price
   html += '<div id="current-price-card" style="background:#1e293b;border-radius:12px;padding:24px;border:2px solid ' + (signal.action === 'BUY' ? '#10b981' : signal.action === 'SELL' ? '#ef4444' : '#334155') + ';">';
   html += '<div style="font-size:16px;color:#94a3b8;margin-bottom:8px;">📍 CURRENT PRICE</div>';
-  html += '<div id="current-price-value" style="font-size:32px;font-weight:700;color:#fff;margin-bottom:4px;">$' + currentPrice.toFixed(2) + '</div>';
+  html += '<div id="current-price-value" style="font-size:32px;font-weight:700;color:#fff;margin-bottom:4px;">$' + currentPriceDisplay + '</div>';
   html += '<div id="current-price-status" style="font-size:14px;color:' + (signal.action === 'BUY' ? '#10b981' : signal.action === 'SELL' ? '#ef4444' : '#6b7280') + ';">';
   html += signal.action === 'BUY' ? '✅ Good entry point' : signal.action === 'SELL' ? '⚠️ Exit/Short here' : '⸏ Wait for setup';
   html += '</div></div>';
@@ -130,7 +131,10 @@ export function updateSignalsLive() {
   }
   
   const priceValueEl = document.getElementById('current-price-value');
-  if (priceValueEl) priceValueEl.textContent = '$' + currentPrice.toFixed(2);
+  if (priceValueEl) {
+    const priceDisplay = currentPrice > 0 ? currentPrice.toFixed(2) : 'N/A';
+    priceValueEl.textContent = '$' + priceDisplay;
+  }
   
   const priceStatusEl = document.getElementById('current-price-status');
   if (priceStatusEl) {

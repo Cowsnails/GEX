@@ -14,7 +14,7 @@ window.appState = {
   ws: null,
   currentView: 'signals',
   optionsData: [],
-  stockData: null,
+  stockData: { price: 0 }, // 🔥 FIX: Initialize with empty object instead of null
   expirations: [],
   filterATM: false,
   filterVolume: false,
@@ -367,5 +367,9 @@ function render() {
 
 // Initialize app on load
 document.addEventListener('DOMContentLoaded', () => {
+  // 🔥 FIX: Render initial UI BEFORE WebSocket data arrives
+  // This ensures pages show with N/A values when markets are closed
+  render();
+
   initWebSocket();
 });

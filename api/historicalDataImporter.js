@@ -30,6 +30,60 @@ function formatDate(date) {
   return `${year}${month}${day}`;
 }
 
+// Helper: Fetch historical stock OHLC data for a specific ticker and date
+export async function fetchHistoricalStockData(ticker, date, retries = 3) {
+  const dateStr = typeof date === 'string' ? date : formatDate(date);
+
+  console.log(`📊 Fetching ${ticker} stock data for ${dateStr}...`);
+
+  try {
+    // ThetaData stock OHLC endpoint
+    // Format: /v2/hist/stock/ohlc?root=AAPL&start_date=20240102&end_date=20240102&ivl=60000
+    // ivl=60000 is 1-minute bars
+    const url = `${THETA_TERMINAL}/v2/hist/stock/ohlc?root=${ticker}&start_date=${dateStr}&end_date=${dateStr}&ivl=60000`;
+
+    console.log(`🔗 Fetching stock data from: ${url}`);
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.response || data.response.length === 0) {
+      console.log(`⚠️ No stock data available for ${ticker} on ${dateStr}`);
+      return { success: false, records: 0, reason: 'no_data' };
+    }
+
+    console.log(`✅ Fetched ${data.response.length} stock bars for ${ticker} ${dateStr}`);
+
+    return {
+      success: true,
+      records: data.response.length,
+      data: data.response,
+      header: data.header,
+      date: dateStr
+    };
+
+  } catch (error) {
+    console.error(`❌ Error fetching stock data for ${ticker} ${dateStr}:`, error.message);
+
+    if (retries > 0) {
+      console.log(`🔄 Retrying stock data... (${retries} attempts left)`);
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s
+      return fetchHistoricalStockData(ticker, date, retries - 1);
+    }
+
+    return {
+      success: false,
+      records: 0,
+      error: error.message
+    };
+  }
+}
+
 // Helper: Get missing dates for a ticker
 export function getMissingDates(ticker, startDate, endDate) {
   const allTradingDays = getTradingDays(startDate, endDate);
@@ -205,34 +259,60 @@ export async function importTickerData(ticker, startDate, endDate, jobId, onProg
       });
     }
 
-    // Fetch data for this date
-    const result = await fetchHistoricalOptionsData(ticker, date);
+    // Fetch BOTH stock and options data for this date
+    const stockResult = await fetchHistoricalStockData(ticker, date);
+    const optionsResult = await fetchHistoricalOptionsData(ticker, date);
 
-    if (result.success && result.data) {
-      // Store the data
-      const storeResult = await storeHistoricalData(ticker, date, result.data);
+    let dateImported = false;
+    let dateRecords = 0;
 
-      if (storeResult.success) {
-        imported++;
-        totalRecords += result.records;
-        console.log(`✅ [${i + 1}/${missingDates.length}] ${ticker} ${date}: ${result.records} records`);
-      } else {
-        failed++;
-        console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Storage failed`);
-      }
+    // Try to store stock data
+    if (stockResult.success && stockResult.data) {
+      console.log(`📊 [${i + 1}/${missingDates.length}] ${ticker} ${date}: ${stockResult.records} stock bars`);
+      dateRecords += stockResult.records;
+      dateImported = true;
+    } else if (stockResult.reason === 'no_data') {
+      console.log(`⚠️ [${i + 1}/${missingDates.length}] ${ticker} ${date}: No stock data (holiday?)`);
+      dateImported = true;
     } else {
-      if (result.reason === 'no_data') {
-        // No data available for this date (holiday, etc.) - mark as imported anyway
-        await storeHistoricalData(ticker, date, []);
-        console.log(`⚠️ [${i + 1}/${missingDates.length}] ${ticker} ${date}: No data (holiday?)`);
-      } else {
-        failed++;
-        console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Fetch failed`);
-      }
+      console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Stock fetch failed`);
     }
 
-    // Rate limiting: Wait 100ms between requests
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Try to store options data
+    if (optionsResult.success && optionsResult.data) {
+      // Store the options data
+      const storeResult = await storeHistoricalData(ticker, date, optionsResult.data);
+
+      if (storeResult.success) {
+        console.log(`📈 [${i + 1}/${missingDates.length}] ${ticker} ${date}: ${optionsResult.records} option contracts`);
+        dateRecords += optionsResult.records;
+        dateImported = true;
+      } else {
+        console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Options storage failed`);
+      }
+    } else if (optionsResult.reason === 'no_data') {
+      console.log(`⚠️ [${i + 1}/${missingDates.length}] ${ticker} ${date}: No options data (holiday?)`);
+      dateImported = true;
+    } else {
+      console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Options fetch failed`);
+    }
+
+    // Track import status
+    if (dateImported) {
+      imported++;
+      totalRecords += dateRecords;
+      // Mark date as imported even if one of the two succeeded
+      if (!optionsResult.success || !stockResult.success) {
+        await storeHistoricalData(ticker, date, []);
+      }
+      console.log(`✅ [${i + 1}/${missingDates.length}] ${ticker} ${date}: ${dateRecords} total records`);
+    } else {
+      failed++;
+      console.error(`❌ [${i + 1}/${missingDates.length}] ${ticker} ${date}: Complete failure`);
+    }
+
+    // Rate limiting: Wait 200ms between requests (fetching 2 endpoints now)
+    await new Promise(resolve => setTimeout(resolve, 200));
   }
 
   console.log(`\n${'='.repeat(60)}`);
@@ -373,6 +453,7 @@ export async function updateAllMissingTickers(userId, onProgress) {
 }
 
 export default {
+  fetchHistoricalStockData,
   fetchHistoricalOptionsData,
   storeHistoricalData,
   importTickerData,
